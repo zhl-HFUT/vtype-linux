@@ -24,6 +24,7 @@ c.type('nihao')
 assert preedit(c) == '', c.preedits
 configure(True)
 assert preedit(c) == 'ni hao', c.preedits
+assert int(c.preedits[-1][1]) == 0, c.preedits[-1]
 assert not c.commits
 c.press('space')
 assert c.commits == ['你好'], c.commits
@@ -31,6 +32,7 @@ assert preedit(c) == '', c.preedits
 c.commits.clear()
 c.type('zhongguo')
 assert preedit(c) == 'zhong guo'
+assert int(c.preedits[-1][1]) == 0
 c.press('esc')
 assert preedit(c) == '' and not c.commits
 c.type('nihao')
@@ -43,6 +45,7 @@ assert c.commits == ['nihao'] and preedit(c) == '', c.commits
 c.type('nihao')
 c.press('backspace')
 assert preedit(c) == 'ni ha', c.preedits
+assert int(c.preedits[-1][1]) == 0
 c.press('esc')
 controller.ReloadAddonConfig('wetype')
 pump()
@@ -54,4 +57,4 @@ fallback.type('nihao')
 assert preedit(fallback) == '' and fallback.candidates
 fallback.press('space')
 assert fallback.commits == ['你好']
-print('PASS 预编辑默认关闭、动态切换、选词/回车/Esc 清空、退格、配置保存、无预编辑能力回退')
+print('PASS 预编辑位置、起点锚定、选词/回车/Esc 清空、退格、配置保存、无预编辑能力回退')
