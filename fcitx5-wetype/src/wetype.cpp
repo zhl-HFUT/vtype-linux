@@ -591,8 +591,13 @@ private:
     }
 
     // 每页候选数跟随 fcitx5 全局设置"候选词数量"(1-10), 取不到时回退 5。
+    // 多行模式下每页容量为行数 * 10 (每行 10 个候选)。
     // 翻页步进、面板显示与数字选词都以它为准, 保证每个可见候选都能选中。
     int pageSize() const {
+        if (*config_.multiRowCandidates) {
+            const int rows = std::clamp(*config_.candidateRows, 2, 10);
+            return rows * 10;
+        }
         const int n = instance_->globalConfig().defaultPageSize();
         return (n >= 1 && n <= 10) ? n : FALLBACK_PAGE_SIZE;
     }
@@ -602,15 +607,24 @@ private:
     bool normalizePage() {
         const int oldStart = windowStart_;
         const int oldSelected = selected_;
-        const int count = static_cast<int>(cands_.size());
+        const int oldCount = static_cast<int>(cands_.size());
         const int page = pageSize();
-        if (count == 0) {
-            windowStart_ = selected_ = 0;
+        if (oldCount == 0) {
+            windowStart_ = selected_ = selectedRow_ = 0;
         } else {
-            windowStart_ = std::clamp(windowStart_, 0, count - 1);
+            windowStart_ = std::clamp(windowStart_, 0, oldCount - 1);
             windowStart_ = (windowStart_ / page) * page;
-            selected_ = std::clamp(selected_, windowStart_,
-                                  std::min(windowStart_ + page, count) - 1);
+            if (*config_.multiRowCandidates) {
+                const int rows = std::clamp(*config_.candidateRows, 2, 10);
+                const int cols = 10;
+                const int totalInPage = std::min<int>(rows * cols, oldCount - windowStart_);
+                const int actualRows = std::max(1, (totalInPage + cols - 1) / cols);
+                selectedRow_ = std::clamp(selectedRow_, 0, actualRows - 1);
+                selected_ = std::min<int>(windowStart_ + selectedRow_ * cols, oldCount - 1);
+            } else {
+                selected_ = std::clamp(selected_, windowStart_,
+                                      std::min(windowStart_ + page, oldCount) - 1);
+            }
         }
         return oldStart != windowStart_ || oldSelected != selected_ ||
                (!cands_.empty() && renderedPageSize_ != page);
@@ -652,32 +666,76 @@ private:
             panel.setCandidateList(std::move(cl));
         }
         if (!cands_.empty()) {
-            const int start = windowStart_;
-            const int end = std::min<int>(start + pageSize(), cands_.size());
-            const int pageCount = end - start;
-            if (selected_ < start || selected_ >= end) selected_ = start;
-            auto cl = std::make_unique<CommonCandidateList>();
-            cl->setLayoutHint(CandidateLayoutHint::Horizontal);
-            cl->setPageSize(pageCount);
-            for (int index = start; index < end; ++index) {
-                Text candidate;
-                // 序号即选词键: 第 10 个显示为 0, 与 fcitx5 的选词习惯一致
-                const int ordinal = index - start;
-                candidate.append(std::string(1, ordinal == 9 ? '0'
-                                        : static_cast<char>('1' + ordinal)) + " ");
-                candidate.append(cands_[index]);
-                if (const auto *gloss = glossary_.lookup(cands_[index])) {
-                    candidate.append(" " + *gloss, TextFormatFlag::Italic);
+            if (*config_.multiRowCandidates) {
+                const int rows = std::clamp(*config_.candidateRows, 2, 10);
+                const int cols = 10;
+                const int pageCapacity = rows * cols;
+                const int start = windowStart_;
+                const int end = std::min<int>(start + pageCapacity, static_cast<int>(cands_.size()));
+                const int totalInPage = end - start;
+                const int actualRows = std::max(1, (totalInPage + cols - 1) / cols);
+
+                if (selectedRow_ >= actualRows) selectedRow_ = actualRows - 1;
+                if (selectedRow_ < 0) selectedRow_ = 0;
+
+                auto cl = std::make_unique<CommonCandidateList>();
+                cl->setLayoutHint(CandidateLayoutHint::Vertical);
+                cl->setPageSize(actualRows);
+
+                for (int r = 0; r < actualRows; ++r) {
+                    const int rowStart = start + r * cols;
+                    const int rowEnd = std::min<int>(rowStart + cols, end);
+                    Text rowText;
+                    for (int c = 0; c < rowEnd - rowStart; ++c) {
+                        const int candIdx = rowStart + c;
+                        const int ordinal = c;
+                        const char numChar = (ordinal == 9) ? '0' : static_cast<char>('1' + ordinal);
+                        if (c > 0) {
+                            rowText.append("  ");
+                        }
+                        rowText.append(std::string(1, numChar) + ".");
+                        rowText.append(cands_[candIdx]);
+                        if (const auto *gloss = glossary_.lookup(cands_[candIdx])) {
+                            rowText.append(" " + *gloss, TextFormatFlag::Italic);
+                        }
+                    }
+                    cl->append<GridColumnCandidate>(std::move(rowText),
+                        [this, rowStart, generation=candidateGeneration_, revision=revision_](InputContext *context) {
+                            if (generation == candidateGeneration_ && revision == revision_) {
+                                commitCandidate(context, rowStart);
+                            }
+                        });
                 }
-                cl->append<GridColumnCandidate>(std::move(candidate),
-                    [this, index, generation=candidateGeneration_, revision=revision_](InputContext *context) {
-                        if(generation==candidateGeneration_ && revision==revision_)commitCandidate(context, index);
-                    });
+                cl->setGlobalCursorIndex(selectedRow_);
+                panel.setCandidateList(std::move(cl));
+            } else {
+                const int start = windowStart_;
+                const int end = std::min<int>(start + pageSize(), cands_.size());
+                const int pageCount = end - start;
+                if (selected_ < start || selected_ >= end) selected_ = start;
+                auto cl = std::make_unique<CommonCandidateList>();
+                cl->setLayoutHint(CandidateLayoutHint::Horizontal);
+                cl->setPageSize(pageCount);
+                for (int index = start; index < end; ++index) {
+                    Text candidate;
+                    // 序号即选词键: 第 10 个显示为 0, 与 fcitx5 的选词习惯一致
+                    const int ordinal = index - start;
+                    candidate.append(std::string(1, ordinal == 9 ? '0'
+                                            : static_cast<char>('1' + ordinal)) + " ");
+                    candidate.append(cands_[index]);
+                    if (const auto *gloss = glossary_.lookup(cands_[index])) {
+                        candidate.append(" " + *gloss, TextFormatFlag::Italic);
+                    }
+                    cl->append<GridColumnCandidate>(std::move(candidate),
+                        [this, index, generation=candidateGeneration_, revision=revision_](InputContext *context) {
+                            if(generation==candidateGeneration_ && revision==revision_)commitCandidate(context, index);
+                        });
+                }
+                // The API validates this index immediately against the list
+                // size, so set it only after all candidates exist.
+                cl->setGlobalCursorIndex(selected_ - start);
+                panel.setCandidateList(std::move(cl));
             }
-            // The API validates this index immediately against the list
-            // size, so set it only after all candidates exist.
-            cl->setGlobalCursorIndex(selected_ - start);
-            panel.setCandidateList(std::move(cl));
         }
         if (inInput || hadClientPreedit) ic.updatePreedit();
         ic.updateUserInterface(UserInterfaceComponent::InputPanel);
@@ -752,6 +810,7 @@ private:
         candidatesCurrent_ = false;
         windowStart_ = 0;
         selected_ = 0;
+        selectedRow_ = 0;
         recoveryTried_ = false;
         eng_.send("C", nullptr);          // 重建会话
         updateUI(*ic);
@@ -784,6 +843,7 @@ private:
         candidatesCurrent_ = false;
         windowStart_ = 0;
         selected_ = 0;
+        selectedRow_ = 0;
         eng_.send(selectionCommand(index), candidateHandler());
         updateUI(*ic);
     }
@@ -937,12 +997,17 @@ private:
                  preview ? 1 : 0);
             windowStart_ = 0;
             selected_ = 0;
+            selectedRow_ = 0;
             updateUI(*ic);
             if (current && pending_) {
                 if (cands_.empty()) fallbackPending(ic);
                 else {
+                    const int target = (pendingCandidateIndex_ >= 0 &&
+                                        pendingCandidateIndex_ < static_cast<int>(cands_.size()))
+                                       ? pendingCandidateIndex_
+                                       : selected_;
                     disarmPending();
-                    commitCandidate(ic, selected_);
+                    commitCandidate(ic, target);
                     drainQueued(ic);
                 }
             }
@@ -968,6 +1033,8 @@ private:
         int time;
     };
     bool pending_ = false;
+    int pendingCandidateIndex_ = -1;
+    char pendingTriggerChar_ = ' ';
     std::deque<QueuedKey> queued_;
     std::unique_ptr<EventSourceTime> pendingTimer_;
     bool draining_ = false;
@@ -983,7 +1050,7 @@ private:
 
     std::string pendingRaw() const {
         std::string raw = buf_;
-        if (pending_) raw += ' ';
+        if (pending_) raw += pendingTriggerChar_;
         for (const auto &key : queued_) {
             if (!key.release) raw += printableText(key.key);
         }
@@ -992,6 +1059,8 @@ private:
 
     void disarmPending() {
         pending_ = false;
+        pendingCandidateIndex_ = -1;
+        pendingTriggerChar_ = ' ';
         pendingTimer_.reset();
     }
 
@@ -1010,8 +1079,10 @@ private:
         }
     }
 
-    void armPending(InputContext *ic) {
+    void armPending(InputContext *ic, int candidateIndex = -1, char triggerChar = ' ') {
         pending_ = true;
+        pendingCandidateIndex_ = candidateIndex;
+        pendingTriggerChar_ = triggerChar;
         auto ref = ic->watch();
         const auto epoch = epoch_;
         // Finite wait covers SKIP, hung engines, and exhausted restarts.
@@ -1168,6 +1239,7 @@ private:
     bool candidatesCurrent_ = false;
     int windowStart_ = 0;
     int selected_ = 0;
+    int selectedRow_ = 0;
     int renderedPageSize_ = 0;
     bool recoveryTried_ = false;
     uint64_t revision_ = 0;
@@ -1247,6 +1319,7 @@ private:
         candidatesCurrent_ = false;
         windowStart_ = 0;
         selected_ = 0;
+        selectedRow_ = 0;
         recoveryTried_ = false;
         eng_.send("C", nullptr);
         if (ic) updateUI(*ic);
@@ -1324,6 +1397,68 @@ void WeTypeEngine::processKey(KeyEvent &event) {
             event.filterAndAccept();
             if (queued_.size() >= 256) fallbackPending(ic);
             else updateUI(*ic);
+            return;
+        }
+    }
+
+    auto matchKeyListCaseInsensitive = [](const Key &eventKey, const std::vector<Key> &list) {
+        if (eventKey.checkKeyList(list) || eventKey.normalize().checkKeyList(list)) return true;
+        const KeySym sym = eventKey.sym();
+        if (sym >= FcitxKey_a && sym <= FcitxKey_z) {
+            const Key toggled(static_cast<KeySym>(sym - FcitxKey_a + FcitxKey_A), eventKey.states());
+            if (toggled.checkKeyList(list) || toggled.normalize().checkKeyList(list)) return true;
+        } else if (sym >= FcitxKey_A && sym <= FcitxKey_Z) {
+            const Key toggled(static_cast<KeySym>(sym - FcitxKey_A + FcitxKey_a), eventKey.states());
+            if (toggled.checkKeyList(list) || toggled.normalize().checkKeyList(list)) return true;
+        }
+        return false;
+    };
+
+    // 多行候选行切换快捷键 (默认 Ctrl+Y/E, Ctrl+Up/Down, 可配置及开关)
+    if (!event.isRelease() && !buf_.empty() && candidatesCurrent_ && !cands_.empty() &&
+        *config_.multiRowCandidates && *config_.multiRowShortcuts) {
+        const int rows = std::clamp(*config_.candidateRows, 2, 10);
+        const int cols = 10;
+        const int pageCapacity = rows * cols;
+        const int start = windowStart_;
+        const int end = std::min<int>(start + pageCapacity, static_cast<int>(cands_.size()));
+        const int totalInPage = end - start;
+        const int actualRows = std::max(1, (totalInPage + cols - 1) / cols);
+
+        const bool isPrevRow = matchKeyListCaseInsensitive(event.key(), *config_.prevRow);
+        const bool isNextRow = matchKeyListCaseInsensitive(event.key(), *config_.nextRow);
+
+        if (isPrevRow || isNextRow) {
+            const int totalCands = static_cast<int>(cands_.size());
+            if (isNextRow) {
+                if (selectedRow_ + 1 < actualRows) {
+                    ++selectedRow_;
+                } else if (windowStart_ + pageCapacity < totalCands) {
+                    windowStart_ += pageCapacity;
+                    selectedRow_ = 0;
+                } else if (windowStart_ > 0 || actualRows > 1) {
+                    windowStart_ = 0;
+                    selectedRow_ = 0;
+                }
+            } else if (isPrevRow) {
+                if (selectedRow_ > 0) {
+                    --selectedRow_;
+                } else if (windowStart_ > 0) {
+                    windowStart_ = std::max(0, windowStart_ - pageCapacity);
+                    const int prevTotal = std::min<int>(pageCapacity, totalCands - windowStart_);
+                    const int prevRows = std::max(1, (prevTotal + cols - 1) / cols);
+                    selectedRow_ = prevRows - 1;
+                } else if (totalCands > pageCapacity || actualRows > 1) {
+                    const int lastPageStart = ((totalCands - 1) / pageCapacity) * pageCapacity;
+                    windowStart_ = lastPageStart;
+                    const int lastTotal = totalCands - windowStart_;
+                    const int lastRows = std::max(1, (lastTotal + cols - 1) / cols);
+                    selectedRow_ = lastRows - 1;
+                }
+            }
+            selected_ = std::min<int>(windowStart_ + selectedRow_ * cols, totalCands - 1);
+            updateUI(*ic);
+            event.filterAndAccept();
             return;
         }
     }
@@ -1455,6 +1590,40 @@ void WeTypeEngine::processKey(KeyEvent &event) {
                 }
             }
             event.filterAndAccept();
+        } else if (sym == FcitxKey_Left) {
+            cursorEditing_ = true;
+            const bool doublePin = (*config_.pinyinScheme == PinyinScheme::Flypy);
+            cursor_ = previousPinyinWord(buf_, cursor_, doublePin);
+            updateUI(*ic);
+            event.filterAndAccept();
+            return;
+        } else if (sym == FcitxKey_Right) {
+            cursorEditing_ = true;
+            const bool doublePin = (*config_.pinyinScheme == PinyinScheme::Flypy);
+            cursor_ = nextPinyinWord(buf_, cursor_, doublePin);
+            updateUI(*ic);
+            event.filterAndAccept();
+            return;
+        }
+    }
+
+    // Readline 快捷键 (Alt+B/F, Alt+Left/Right): 单词/音节级光标移动
+    if (!event.isRelease() && !buf_.empty() && *config_.readlineKeyBindings &&
+        (event.key().states().test(KeyState::Alt) || event.key().states().test(KeyState::Meta)) &&
+        !event.key().states().testAny(KeyStates{KeyState::Ctrl, KeyState::Super,
+                                                KeyState::Super2, KeyState::Hyper,
+                                                KeyState::Hyper2, KeyState::Mod5})) {
+        cursorEditing_ = true;
+        const bool doublePin = (*config_.pinyinScheme == PinyinScheme::Flypy);
+        if (sym == FcitxKey_b || sym == FcitxKey_B || sym == FcitxKey_Left) {
+            cursor_ = previousPinyinWord(buf_, cursor_, doublePin);
+            updateUI(*ic);
+            event.filterAndAccept();
+            return;
+        } else if (sym == FcitxKey_f || sym == FcitxKey_F || sym == FcitxKey_Right) {
+            cursor_ = nextPinyinWord(buf_, cursor_, doublePin);
+            updateUI(*ic);
+            event.filterAndAccept();
             return;
         }
     }
@@ -1529,19 +1698,39 @@ void WeTypeEngine::processKey(KeyEvent &event) {
                 handled = true;
             }
         }
-        // Tab / Shift+Tab: 在当前页候选词之间循环切换选择
+        // Tab / Shift+Tab: 在当前页候选词之间循环切换选择 (多行模式下切换候选行)
         else if (!buf_.empty() && (sym == FcitxKey_Tab || sym == FcitxKey_ISO_Left_Tab)) {
             if (candidatesCurrent_ && !cands_.empty()) {
-                const int page = pageSize();
-                const int count = std::min<int>(windowStart_ + page, static_cast<int>(cands_.size())) - windowStart_;
-                if (count > 0) {
-                    const bool backwards = (sym == FcitxKey_ISO_Left_Tab) || event.key().states().test(KeyState::Shift);
-                    if (backwards) {
-                        selected_ = windowStart_ + ((selected_ - windowStart_ - 1 + count) % count);
-                    } else {
-                        selected_ = windowStart_ + ((selected_ - windowStart_ + 1) % count);
+                if (*config_.multiRowCandidates) {
+                    const int rows = std::clamp(*config_.candidateRows, 2, 10);
+                    const int cols = 10;
+                    const int pageCapacity = rows * cols;
+                    const int start = windowStart_;
+                    const int end = std::min<int>(start + pageCapacity, static_cast<int>(cands_.size()));
+                    const int totalInPage = end - start;
+                    const int actualRows = (totalInPage + cols - 1) / cols;
+                    if (actualRows > 0) {
+                        const bool backwards = (sym == FcitxKey_ISO_Left_Tab) || event.key().states().test(KeyState::Shift);
+                        if (backwards) {
+                            selectedRow_ = (selectedRow_ - 1 + actualRows) % actualRows;
+                        } else {
+                            selectedRow_ = (selectedRow_ + 1) % actualRows;
+                        }
+                        selected_ = std::min<int>(windowStart_ + selectedRow_ * cols, static_cast<int>(cands_.size()) - 1);
+                        updateUI(*ic);
                     }
-                    updateUI(*ic);
+                } else {
+                    const int page = pageSize();
+                    const int count = std::min<int>(windowStart_ + page, static_cast<int>(cands_.size())) - windowStart_;
+                    if (count > 0) {
+                        const bool backwards = (sym == FcitxKey_ISO_Left_Tab) || event.key().states().test(KeyState::Shift);
+                        if (backwards) {
+                            selected_ = windowStart_ + ((selected_ - windowStart_ - 1 + count) % count);
+                        } else {
+                            selected_ = windowStart_ + ((selected_ - windowStart_ + 1) % count);
+                        }
+                        updateUI(*ic);
+                    }
                 }
             }
             handled = true;
@@ -1572,6 +1761,7 @@ void WeTypeEngine::processKey(KeyEvent &event) {
                     candidatesCurrent_ = false;
                     windowStart_ = 0;
                     selected_ = 0;
+                    selectedRow_ = 0;
                     updateUI(*ic);
                 } else {
                     requestCandidates(buf_);
@@ -1587,6 +1777,7 @@ void WeTypeEngine::processKey(KeyEvent &event) {
             if (windowStart_ > 0) {
                 windowStart_ = std::max(0, windowStart_ - pageSize());
                 selected_ = windowStart_;
+                selectedRow_ = 0;
                 updateUI(*ic);
             }
             handled = true;
@@ -1597,6 +1788,7 @@ void WeTypeEngine::processKey(KeyEvent &event) {
                 windowStart_ + pageSize() < (int)cands_.size()) {
                 windowStart_ += pageSize();
                 selected_ = windowStart_;
+                selectedRow_ = 0;
                 updateUI(*ic);
             }
             handled = true;
@@ -1614,15 +1806,47 @@ void WeTypeEngine::processKey(KeyEvent &event) {
                 handled = true;
             }
         }
-        // 数字选词(全局序号 = 页首 + 数字, 0 选第 10 个)
-        else if ((sym >= FcitxKey_1 && sym <= FcitxKey_9) ||
-                 (sym == FcitxKey_0 && pageSize() >= 10)) {
-            const int ordinal = (sym == FcitxKey_0) ? 9
-                              : static_cast<int>(sym - FcitxKey_1);
-            const int idx = windowStart_ + ordinal;
-            if (ordinal < pageSize() && candidatesCurrent_ && !cands_.empty() &&
-                idx < (int)cands_.size()) {
-                commitCandidate(ic, idx);
+        // 数字选词 (1-9, 0 以及小键盘数字 KP_1-KP_9, KP_0)
+        else if (!buf_.empty() && (
+                 (sym >= FcitxKey_1 && sym <= FcitxKey_9) ||
+                 (sym >= FcitxKey_KP_1 && sym <= FcitxKey_KP_9) ||
+                 ((sym == FcitxKey_0 || sym == FcitxKey_KP_0) &&
+                  (*config_.multiRowCandidates || pageSize() >= 10)))) {
+            int ordinal = -1;
+            if (sym >= FcitxKey_1 && sym <= FcitxKey_9) {
+                ordinal = static_cast<int>(sym - FcitxKey_1);
+            } else if (sym == FcitxKey_0) {
+                ordinal = 9;
+            } else if (sym >= FcitxKey_KP_1 && sym <= FcitxKey_KP_9) {
+                ordinal = static_cast<int>(sym - FcitxKey_KP_1);
+            } else if (sym == FcitxKey_KP_0) {
+                ordinal = 9;
+            }
+
+            int idx = -1;
+            if (*config_.multiRowCandidates) {
+                const int cols = 10;
+                idx = windowStart_ + selectedRow_ * cols + ordinal;
+                const int rowEnd = std::min<int>(windowStart_ + (selectedRow_ + 1) * cols, static_cast<int>(cands_.size()));
+                if (idx >= rowEnd) {
+                    idx = -1;
+                }
+            } else {
+                if (ordinal < pageSize()) {
+                    idx = windowStart_ + ordinal;
+                }
+            }
+
+            if (candidatesCurrent_ && !cands_.empty()) {
+                if (idx >= 0 && idx < static_cast<int>(cands_.size())) {
+                    commitCandidate(ic, idx);
+                    handled = true;
+                }
+            } else if (!buf_.empty() && (ordinal < pageSize() || *config_.multiRowCandidates)) {
+                // 候选还在获取中（如光标移动编辑后重建会话），挂起选词意图，候选到达后自动上屏
+                const int target = idx >= 0 ? idx : (windowStart_ + ordinal);
+                const char trig = (ordinal == 9) ? '0' : static_cast<char>('1' + ordinal);
+                armPending(ic, target, trig);
                 handled = true;
             }
         }
@@ -1630,7 +1854,7 @@ void WeTypeEngine::processKey(KeyEvent &event) {
         else if (sym == FcitxKey_space) {
             if (!buf_.empty()) {
                 if (candidatesCurrent_ && !cands_.empty()) commitCandidate(ic, selected_);   // 含部分选词与词库学习
-                else armPending(ic);
+                else armPending(ic, selected_, ' ');
                 handled = true;
             }
         }
@@ -1659,6 +1883,7 @@ void WeTypeEngine::processKey(KeyEvent &event) {
                         candidatesCurrent_ = false;
                         windowStart_ = 0;
                         selected_ = 0;
+                        selectedRow_ = 0;
                         updateUI(*ic);
                     } else {
                         requestCandidates(buf_);

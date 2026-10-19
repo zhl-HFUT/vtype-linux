@@ -129,8 +129,71 @@ int main() {
         if (!Key(FcitxKey_u, KeyState::Ctrl).check(FcitxKey_u, KeyState::Ctrl)) {
             throw std::runtime_error("Ctrl+U check failed");
         }
+        if (!Key(FcitxKey_b, KeyState::Alt).check(FcitxKey_b, KeyState::Alt)) {
+            throw std::runtime_error("Alt+B check failed");
+        }
+        if (!Key(FcitxKey_f, KeyState::Alt).check(FcitxKey_f, KeyState::Alt)) {
+            throw std::runtime_error("Alt+F check failed");
+        }
 
-        std::cout << "PASS cursor_test: config, pinyin segmentation cursor mapping, and readline keys\n";
+        // 5. 单词/音节级光标跳转验证 (previousPinyinWord / nextPinyinWord)
+        // 5.1 全拼正常音节: "shurufa" (0:shu, 3:ru, 5:fa)
+        if (previousPinyinWord("shurufa", 7, false) != 5 ||
+            previousPinyinWord("shurufa", 6, false) != 5 ||
+            previousPinyinWord("shurufa", 5, false) != 3 ||
+            previousPinyinWord("shurufa", 4, false) != 3 ||
+            previousPinyinWord("shurufa", 3, false) != 0 ||
+            previousPinyinWord("shurufa", 1, false) != 0 ||
+            previousPinyinWord("shurufa", 0, false) != 0) {
+            throw std::runtime_error("shurufa backward word failed");
+        }
+        if (nextPinyinWord("shurufa", 0, false) != 3 ||
+            nextPinyinWord("shurufa", 1, false) != 3 ||
+            nextPinyinWord("shurufa", 3, false) != 5 ||
+            nextPinyinWord("shurufa", 4, false) != 5 ||
+            nextPinyinWord("shurufa", 5, false) != 7 ||
+            nextPinyinWord("shurufa", 7, false) != 7) {
+            throw std::runtime_error("shurufa forward word failed");
+        }
+
+        // 5.2 全拼错拼/声母: "shrufa" (0:sh, 2:ru, 4:fa)
+        // Alt+B 从末尾 6 -> 4 (fa前) -> 2 (ru前，即h后) -> 0
+        if (previousPinyinWord("shrufa", 6, false) != 4 ||
+            previousPinyinWord("shrufa", 4, false) != 2 ||
+            previousPinyinWord("shrufa", 2, false) != 0) {
+            throw std::runtime_error("shrufa backward word failed");
+        }
+        if (nextPinyinWord("shrufa", 0, false) != 2 ||
+            nextPinyinWord("shrufa", 2, false) != 4 ||
+            nextPinyinWord("shrufa", 4, false) != 6) {
+            throw std::runtime_error("shrufa forward word failed");
+        }
+
+        // 5.3 隔音符: "xi'an" (0:xi, 3:an)
+        if (previousPinyinWord("xi'an", 5, false) != 3 ||
+            previousPinyinWord("xi'an", 4, false) != 3 ||
+            previousPinyinWord("xi'an", 3, false) != 0 ||
+            previousPinyinWord("xi'an", 2, false) != 0) {
+            throw std::runtime_error("xi'an backward word failed");
+        }
+        if (nextPinyinWord("xi'an", 0, false) != 2 ||
+            nextPinyinWord("xi'an", 2, false) != 5 ||
+            nextPinyinWord("xi'an", 3, false) != 5) {
+            throw std::runtime_error("xi'an forward word failed");
+        }
+
+        // 5.4 双拼: "shrf" (0:sh, 2:rf)
+        if (previousPinyinWord("shrf", 4, true) != 2 ||
+            previousPinyinWord("shrf", 3, true) != 2 ||
+            previousPinyinWord("shrf", 2, true) != 0) {
+            throw std::runtime_error("double pinyin backward word failed");
+        }
+        if (nextPinyinWord("shrf", 0, true) != 2 ||
+            nextPinyinWord("shrf", 2, true) != 4) {
+            throw std::runtime_error("double pinyin forward word failed");
+        }
+
+        std::cout << "PASS cursor_test: config, pinyin segmentation cursor mapping, and readline word/char keys\n";
         return 0;
     } catch (const std::exception &err) {
         std::cerr << "FAIL " << err.what() << '\n';

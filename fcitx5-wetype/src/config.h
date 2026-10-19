@@ -23,7 +23,7 @@ FCITX_CONFIGURATION(WeTypeConfig,
     Option<bool> arrowKeysMoveCursor{
         this, "ArrowKeysMoveCursor", "方向键左右移动拼音光标", true};
     Option<bool> readlineKeyBindings{
-        this, "ReadlineKeyBindings", "启用 Readline 快捷键 (Ctrl+A/E/B/F/D/H/K/U)", true};
+        this, "ReadlineKeyBindings", "启用 Readline 快捷键 (Ctrl+A/E/B/F/D/H/K/U, Alt+B/F)", true};
     KeyListOption prevPage{
         this, "PrevPage", "上一页",
         {Key(FcitxKey_minus), Key(FcitxKey_KP_Subtract), Key(FcitxKey_Up), Key(FcitxKey_Page_Up)},
@@ -31,6 +31,22 @@ FCITX_CONFIGURATION(WeTypeConfig,
     KeyListOption nextPage{
         this, "NextPage", "下一页",
         {Key(FcitxKey_equal), Key(FcitxKey_plus), Key(FcitxKey_KP_Add), Key(FcitxKey_Down), Key(FcitxKey_Page_Down)},
+        KeyListConstrain(KeyConstrainFlag::AllowModifierLess)};
+
+    // 多行候选词设置
+    Option<bool> multiRowCandidates{
+        this, "MultiRowCandidates", "启用多行候选词显示", false};
+    Option<int, IntConstrain> candidateRows{
+        this, "CandidateRows", "候选行数 (2-10)", 5, IntConstrain(2, 10)};
+    Option<bool> multiRowShortcuts{
+        this, "MultiRowShortcuts", "启用候选行切换快捷键 (Up/Down, Ctrl+Y/E)", true};
+    KeyListOption prevRow{
+        this, "PrevRow", "上一候选行",
+        {Key(FcitxKey_Up), Key(FcitxKey_y, KeyState::Ctrl), Key(FcitxKey_Up, KeyState::Ctrl)},
+        KeyListConstrain(KeyConstrainFlag::AllowModifierLess)};
+    KeyListOption nextRow{
+        this, "NextRow", "下一候选行",
+        {Key(FcitxKey_Down), Key(FcitxKey_e, KeyState::Ctrl), Key(FcitxKey_Down, KeyState::Ctrl)},
         KeyListConstrain(KeyConstrainFlag::AllowModifierLess)};
 
     // 模糊音设置 (19 组，与微信输入法官方一致)

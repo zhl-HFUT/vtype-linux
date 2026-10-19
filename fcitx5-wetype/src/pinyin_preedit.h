@@ -2,15 +2,15 @@
 
 #include <fcitx/text.h>
 #include <algorithm>
+#include <cctype>
 #include <sstream>
 #include <string>
 #include <unordered_set>
+#include <vector>
 
 namespace fcitx {
 
-// Display-only segmentation. The original unsegmented buffer is still sent to
-// the WeType engine, so this never changes composition or candidate matching.
-static inline std::string segmentPinyin(const std::string &raw, int rawCursor = -1, int *displayCursor = nullptr) {
+static inline const std::unordered_set<std::string> &pinyinSyllables() {
     static const std::unordered_set<std::string> syllables = [] {
         static const char *data =
             "a ai an ang ao e ei en eng er o ou "
@@ -43,6 +43,115 @@ static inline std::string segmentPinyin(const std::string &raw, int rawCursor = 
         while (input >> item) result.insert(item);
         return result;
     }();
+    return syllables;
+}
+
+struct PinyinWord {
+    int start;
+    int end;
+};
+
+// 获取拼音缓冲区内所有音节/词语的 [start, end) 区间
+static inline std::vector<PinyinWord> pinyinWords(const std::string &raw, bool doublePin) {
+    std::vector<PinyinWord> words;
+    if (raw.empty()) return words;
+
+    if (doublePin) {
+        for (size_t i = 0; i < raw.size();) {
+            if (raw[i] == '\'' || raw[i] == ' ') {
+                ++i;
+                continue;
+            }
+            int start = static_cast<int>(i);
+            size_t count = 0;
+            while (i < raw.size() && raw[i] != '\'' && raw[i] != ' ' && count < 2) {
+                ++i;
+                ++count;
+            }
+            if (count > 0) {
+                words.push_back({start, static_cast<int>(i)});
+            }
+        }
+        return words;
+    }
+
+    const auto &syllables = pinyinSyllables();
+    for (size_t i = 0; i < raw.size();) {
+        if (raw[i] == '\'' || raw[i] == ' ') {
+            ++i;
+            continue;
+        }
+        size_t match = 0;
+        const size_t limit = std::min(raw.size(), i + 6);
+        for (size_t end = limit; end > i; --end) {
+            if (raw.find('\'', i) < end) continue;
+            std::string sub = raw.substr(i, end - i);
+            for (char &c : sub) {
+                if (c >= 'A' && c <= 'Z') c = static_cast<char>(c - 'A' + 'a');
+            }
+            if (syllables.count(sub)) {
+                match = end - i;
+                break;
+            }
+        }
+        if (match > 0) {
+            words.push_back({static_cast<int>(i), static_cast<int>(i + match)});
+            i += match;
+        } else {
+            // 没有完整匹配的合法音节（如错拼、声母或不完整音节）
+            // 优先检查双字母声母 zh, ch, sh
+            int start = static_cast<int>(i);
+            if (i + 2 <= raw.size() && raw[i] != '\'' && raw[i + 1] != '\'') {
+                char c0 = static_cast<char>(std::tolower(static_cast<unsigned char>(raw[i])));
+                char c1 = static_cast<char>(std::tolower(static_cast<unsigned char>(raw[i + 1])));
+                if ((c0 == 'z' || c0 == 'c' || c0 == 's') && c1 == 'h') {
+                    words.push_back({start, static_cast<int>(i + 2)});
+                    i += 2;
+                    continue;
+                }
+            }
+            // 单字符前进
+            words.push_back({start, static_cast<int>(i + 1)});
+            i += 1;
+        }
+    }
+    return words;
+}
+
+// Readline backward-word: 移动到当前或上一音节/词语的开头
+static inline int previousPinyinWord(const std::string &raw, int cursor, bool doublePin) {
+    if (cursor <= 0 || raw.empty()) return 0;
+    if (cursor > static_cast<int>(raw.size())) cursor = static_cast<int>(raw.size());
+    const auto words = pinyinWords(raw, doublePin);
+    int target = 0;
+    for (const auto &w : words) {
+        if (w.start < cursor) {
+            target = w.start;
+        } else {
+            break;
+        }
+    }
+    return target;
+}
+
+// Readline forward-word: 移动到当前或下一音节/词语的末尾
+static inline int nextPinyinWord(const std::string &raw, int cursor, bool doublePin) {
+    const int len = static_cast<int>(raw.size());
+    if (cursor >= len || raw.empty()) return len;
+    if (cursor < 0) cursor = 0;
+    const auto words = pinyinWords(raw, doublePin);
+    for (const auto &w : words) {
+        if (w.end > cursor) {
+            return w.end;
+        }
+    }
+    return len;
+}
+
+// Display-only segmentation. The original unsegmented buffer is still sent to
+// the WeType engine, so this never changes composition or candidate matching.
+static inline std::string segmentPinyin(const std::string &raw, int rawCursor = -1, int *displayCursor = nullptr) {
+    const auto &syllables = pinyinSyllables();
 
     std::string out;
     int dispCursor = -1;
