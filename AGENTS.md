@@ -134,7 +134,7 @@ bash scripts/e2_img.sh
 |---|---|
 | 候选窗不出现 | `fcitx5-remote -n` 是否为 `wetype-im`；`~/.local/state/wetype-ime/harness.log` 末尾是否有崩溃；重新跑自检 |
 | 引擎启动即退出，日志里有 `Resource may not ready` | 词库清单和资源不配套，见 [docs/更新公共词库.md](docs/更新公共词库.md) |
-| 剪贴板不同步 | `wetype-cloud.py clipboard status` 的 `running` 和 `error`；`systemctl --user status wetype-clipboard.service`；官方客户端是否开启跨设备复制粘贴 |
+| 剪贴板不同步 | `wetype-cloud.py clipboard status` 的 `running` 和 `error`；`journalctl --user -u wetype-clipboard.service` 的逐条收发记录（跳过原因、耗时）；官方客户端是否开启跨设备复制粘贴 |
 | 云候选没反应 | `wetype-cloud.py status`；网络要能直连官方服务器，代理只认系统级 TUN，不读 `http_proxy` |
 | 某个应用里打不了字 | 查该应用用的输入法模块（GTK/Qt 的 `*_IM_MODULE`、XIM、Wayland text-input），换个应用对比 |
 

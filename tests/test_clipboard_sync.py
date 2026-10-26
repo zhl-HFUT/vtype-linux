@@ -213,6 +213,27 @@ class ClipboardSyncTest(unittest.TestCase):
         self.assertEqual(self.sync.status()['received'], 1)
 
 
+class ClipboardSyncLogTest(unittest.TestCase):
+    def test_events_are_logged_once_without_clipboard_contents(self):
+        with tempfile.TemporaryDirectory() as directory:
+            lines = []
+            desktop, group = MemoryClipboard(), MemoryGroup()
+            sync = Synchronizer(desktop, group, Path(directory) / 'state.json', images=True, log=lines.append)
+            sync.step()
+            desktop.text = '私密文字'
+            sync.step()
+            group.receive('过期内容', version=7, expires=500)
+            sync.step()
+            sync.step()
+            group.images[8] = PNG
+            group.receive('', version=8, kind=6)
+            sync.step()
+            self.assertEqual(lines, ['本机复制：文本 4 字', lines[1], '跳过远端 v7：已过期', lines[3]])
+            self.assertRegex(lines[1], r'^已发送 v6：文本 4 字，用时 \d+\.\d 秒$')
+            self.assertRegex(lines[3], r'^已收到 v8：图片 PNG 0\.0 MB，剩余有效期 1000 秒，下载与写入用时 \d+\.\d 秒$')
+            self.assertFalse(any('私密' in line or '过期内容' in line for line in lines))
+
+
 class ClipboardImageSyncTest(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
