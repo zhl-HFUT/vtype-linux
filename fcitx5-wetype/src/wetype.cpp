@@ -58,6 +58,7 @@
 #include "punctuation.h"
 #include "config.h"
 #include "pinyin_preedit.h"
+#include "voice_input.h"
 
 namespace fcitx {
 
@@ -384,6 +385,134 @@ private:
     uint32_t fuzzyFlags_ = 0;
 };
 
+// ---------------------------------------------------------------- 语音输入辅助进程
+// 常驻的 wetype-cloud.py voice --serve；只有收到 START 才打开麦克风，行协议见 voice_input.h。
+class VoiceHelper {
+public:
+    explicit VoiceHelper(EventLoop &loop) : loop_(loop) {}
+    ~VoiceHelper() { stop(); }
+
+    void setOnLine(std::function<void(const std::string &)> cb) { onLine_ = std::move(cb); }
+    void setOnExit(std::function<void()> cb) { onExit_ = std::move(cb); }
+    bool alive() const { return pid_ > 0; }
+    void resetFailures() { failures_ = 0; }
+
+    bool start() {
+        if (pid_ > 0) return true;
+        if (failures_ >= 5) return false;   // 连续启动即退出，等配置变化后再试
+        std::string eng, dicts, work, qemu, sysroot;
+        resolveDirs(eng, dicts, work, qemu, sysroot);
+        // 测试可用 WETYPE_VOICE_HELPER 指定替身程序。
+        const char *custom = getenv("WETYPE_VOICE_HELPER");
+        const std::string script = eng + "/wetype-cloud.py";
+        if (!(custom && *custom) && access(script.c_str(), R_OK) != 0) return false;
+        int inP[2], outP[2];
+        if (pipe2(inP, O_CLOEXEC) < 0) return false;
+        if (pipe2(outP, O_CLOEXEC) < 0) {
+            close(inP[0]); close(inP[1]);
+            return false;
+        }
+        pid_t p = fork();
+        if (p < 0) {
+            close(inP[0]); close(inP[1]); close(outP[0]); close(outP[1]);
+            return false;
+        }
+        if (p == 0) {
+            // 独立进程组：Fcitx 退出或强制结束时连同录音子进程一起清理。
+            setpgid(0, 0);
+            dup2(inP[0], 0);
+            dup2(outP[1], 1);
+            close(inP[0]); close(inP[1]); close(outP[0]); close(outP[1]);
+            if (custom && *custom) execl(custom, custom, (char *)nullptr);
+            else execl(WETYPE_PYTHON_EXECUTABLE, WETYPE_PYTHON_EXECUTABLE, script.c_str(),
+                       "voice", "--serve", (char *)nullptr);
+            _exit(127);
+        }
+        close(inP[0]);
+        close(outP[1]);
+        pid_ = p; in_ = inP[1]; out_ = outP[0];
+        started_ = now(CLOCK_MONOTONIC);
+        rbuf_.clear();
+        ioSource_ = loop_.addIOEvent(
+            out_, IOEventFlags(IOEventFlag::In),
+            [this](EventSourceIO *, int fd, IOEventFlags) { onReadable(fd); return true; });
+        WLOG("voice helper started pid=%d\n", pid_);
+        return true;
+    }
+
+    void send(const std::string &line) {
+        if (in_ < 0) return;
+        const std::string out = line + "\n";
+        if (write(in_, out.data(), out.size()) < 0) {
+            WLOG("voice helper write failed errno=%d\n", errno);
+            die();
+        }
+    }
+
+    void stop() {
+        if (pid_ > 0) {
+            if (in_ >= 0) {
+                ssize_t w = write(in_, "Q\n", 2);
+                (void)w;
+                close(in_);
+                in_ = -1;
+            }
+            int st = 0;
+            bool exited = false;
+            for (int i = 0; i < 50; ++i) {
+                const pid_t result = waitpid(pid_, &st, WNOHANG);
+                if (result == pid_ || (result < 0 && errno == ECHILD)) { exited = true; break; }
+                usleep(10000);
+            }
+            if (!exited) {
+                kill(-pid_, SIGKILL);
+                while (waitpid(pid_, &st, 0) < 0 && errno == EINTR) {}
+            }
+            pid_ = -1;
+        }
+        if (in_ >= 0) { close(in_); in_ = -1; }
+        if (out_ >= 0) { close(out_); out_ = -1; }
+        ioSource_.reset();
+        rbuf_.clear();
+    }
+
+private:
+    void onReadable(int fd) {
+        char tmp[8192];
+        const ssize_t n = read(fd, tmp, sizeof tmp);
+        if (n <= 0) {
+            WLOG("voice helper EOF\n");
+            die();
+            return;
+        }
+        rbuf_.append(tmp, n);
+        if (rbuf_.size() > 1 << 20) { die(); return; }
+        size_t pos;
+        while (pid_ > 0 && (pos = rbuf_.find('\n')) != std::string::npos) {
+            const std::string line = rbuf_.substr(0, pos);
+            rbuf_.erase(0, pos + 1);
+            if (onLine_) onLine_(line);
+        }
+    }
+
+    void die() {
+        const bool quick = now(CLOCK_MONOTONIC) - started_ < 3000000;
+        stop();
+        failures_ = quick ? failures_ + 1 : 0;
+        if (onExit_) onExit_();
+    }
+
+    EventLoop &loop_;
+    pid_t pid_ = -1;
+    int in_ = -1, out_ = -1;
+    uint64_t started_ = 0;
+    int failures_ = 0;
+    std::string rbuf_;
+    std::unique_ptr<EventSourceIO> ioSource_;
+    std::function<void(const std::string &)> onLine_;
+    std::function<void()> onExit_;
+};
+
 // Punctuation history belongs to one input context and is never shared by
 // Fcitx's ShareInputState option (the property's default needCopy() is false).
 struct PunctuationState : InputContextProperty {
@@ -409,6 +538,11 @@ public:
         }
         if (!instance_->inputContextManager().registerProperty("wetype-mode-state", &modeFactory_))
             throw std::runtime_error("cannot register WeType mode state");
+        // 语音输入的按住/松开先于其他处理；中英文模式下都可用。
+        voice_.setOnLine([this](const std::string &line) { onVoiceLine(line); });
+        voice_.setOnExit([this] { onVoiceExit(); });
+        voiceWatcher_=instance_->watchEvent(EventType::InputContextKeyEvent,EventWatcherPhase::PreInputMethod,
+            [this](Event &event) { voiceKey(static_cast<KeyEvent &>(event)); });
         // 在 Fcitx 全局中英开关之前处理单独轻按的 Shift，仅作用于微信输入法；Ctrl+Space 交给 Fcitx。
         modeWatcher_=instance_->watchEvent(EventType::InputContextKeyEvent,EventWatcherPhase::PreInputMethod,
             [this](Event &event) {
@@ -486,8 +620,14 @@ public:
         cloudTimer_=instance_->eventLoop().addTimeEvent(CLOCK_MONOTONIC,now(CLOCK_MONOTONIC)+60000,0,
             [this](EventSourceTime *source,uint64_t){cloudTick();source->setNextInterval(60000);source->setEnabled(true);return true;});
         ensureEngine();
+        // 设了语音按键就预先启动辅助进程，第一次按下时不必等 Python 启动。
+        if (!config_.voiceInputKey->empty()) voice_.start();
     }
     ~WeTypeEngine() override {
+        voiceWatcher_.reset();
+        voiceTimer_.reset();
+        voiceRelease_.reset();
+        voice_.stop();
         syncTimer_.reset();
         cloudTimer_.reset();
         if (syncLock_ >= 0) close(syncLock_);
@@ -506,6 +646,7 @@ public:
         safeSaveAsIni(config_, "conf/wetype.conf");
         applyEngineConfig(previousScheme, previousFuzzy);
         applyPreeditLocation(previousPreedit);
+        applyVoiceConfig();
     }
     void reloadConfig() override {
         const auto previousScheme = *config_.pinyinScheme;
@@ -514,6 +655,7 @@ public:
         readAsIni(config_, "conf/wetype.conf");
         applyEngineConfig(previousScheme, previousFuzzy);
         applyPreeditLocation(previousPreedit);
+        applyVoiceConfig();
     }
     std::string subMode(const InputMethodEntry &,InputContext &ic) override {
         return ic.propertyFor(&modeFactory_)->english?"英文":"中文";
@@ -537,6 +679,9 @@ public:
     void deactivate(const InputMethodEntry &entry, InputContextEvent &event) override {
         auto *ic = event.inputContext();
         if (!ic) return;
+        // 失焦或切换输入法时放弃本次语音，不把结果上屏到别处。
+        if (voiceState_ != VoiceState::Idle && voiceIc_.get() == ic) cancelVoice();
+        else if (voiceState_ == VoiceState::Idle) voiceHeld_ = false;   // 结果已上屏但键还按着时失焦
         // Fcitx calls deactivate before changing the active input method. If
         // Shift (or another IM toggle) is pressed mid-composition, preserve
         // the unfinished pinyin as literal text instead of dropping it.
@@ -1244,6 +1389,249 @@ private:
     bool recoveryTried_ = false;
     uint64_t revision_ = 0;
     TrackableObjectReference<InputContext> icRef_;
+
+    // ------------------------------------------------------------ 语音输入：按住说话、松开结束
+    // 按下即开始录音并流式识别，识别中的文字显示为预编辑；松开后等最终结果上屏。
+    enum class VoiceState { Idle, Listening, Recognizing, Message };
+    static constexpr uint64_t VOICE_TAP_USEC = 300000;      // 按住不到 0.3 秒视为误触，不识别
+    static constexpr uint64_t VOICE_RELEASE_USEC = 40000;   // X11 自动重复会插入成对的松开/按下
+    static constexpr uint64_t VOICE_MESSAGE_USEC = 2500000;
+    VoiceHelper voice_{instance_->eventLoop()};
+    std::unique_ptr<HandlerTableEntry<EventHandler>> voiceWatcher_;
+    std::unique_ptr<EventSourceTime> voiceTimer_, voiceRelease_;
+    VoiceState voiceState_ = VoiceState::Idle;
+    TrackableObjectReference<InputContext> voiceIc_;
+    std::string voiceId_, voiceText_, voiceMessage_;
+    std::deque<int> voiceLevels_;
+    uint64_t voiceSerial_ = 0, voicePressed_ = 0;
+    KeySym voiceSym_ = FcitxKey_None;
+    bool voiceHeld_ = false, voiceRecording_ = false;
+
+    static bool shortcutModifier(const Key &key) {
+        return key.states().testAny(KeyStates{KeyState::Ctrl, KeyState::Alt, KeyState::Super, KeyState::Super2,
+                                              KeyState::Meta, KeyState::Hyper, KeyState::Hyper2, KeyState::Mod5});
+    }
+
+    void applyVoiceConfig() {
+        if (config_.voiceInputKey->empty()) {
+            cancelVoice();
+            voice_.stop();
+            return;
+        }
+        voice_.resetFailures();
+        voice_.start();
+    }
+
+    void voiceKey(KeyEvent &event) {
+        if (voiceState_ == VoiceState::Idle && !voiceHeld_ && (event.isRelease() || config_.voiceInputKey->empty())) return;
+        auto *ic = event.inputContext();
+        const auto *entry = instance_->inputMethodEntry(ic);
+        if (!entry || entry->uniqueName() != "wetype-im") return;
+        const KeySym sym = event.key().sym();
+        if (voiceHeld_ && sym == voiceSym_) {
+            event.filterAndAccept();
+            if (event.isRelease()) {
+                // 稍等再结束：紧接着又按下同一键就是自动重复，继续录音。
+                voiceRelease_ = instance_->eventLoop().addTimeEvent(
+                    CLOCK_MONOTONIC, now(CLOCK_MONOTONIC) + VOICE_RELEASE_USEC, 0,
+                    [this](EventSourceTime *, uint64_t) {
+                        auto keepAlive = std::move(voiceRelease_);
+                        releaseVoice();
+                        return true;
+                    });
+            } else {
+                voiceRelease_.reset();
+            }
+            return;
+        }
+        if (event.isRelease()) return;
+        if (voiceState_ == VoiceState::Message && !voiceHeld_) endVoice();
+        if (voiceState_ == VoiceState::Idle) {
+            if (!event.key().checkKeyList(*config_.voiceInputKey)) return;
+            // 正在拼写时按键照常交给拼音；密码框不录音。
+            if (ic->capabilityFlags().test(CapabilityFlag::Password) || !buf_.empty() || pending_) return;
+            startVoice(ic, sym);
+            event.filterAndAccept();
+            return;
+        }
+        if (Key(sym).isModifier()) return;   // 单独按下的修饰键不打断语音
+        if (voiceHeld_ || voiceIc_.get() != ic) {
+            // 按住时又按了别的键（多半是组合键），或换了输入框：放弃这次语音，按键照常处理。
+            cancelVoice();
+            return;
+        }
+        if (voiceState_ == VoiceState::Message) return;
+        // 松开后等待结果期间：Esc 取消；其他按键先把已识别的文字上屏，再照常处理。
+        if (sym == FcitxKey_Escape && !shortcutModifier(event.key())) {
+            cancelVoice();
+            event.filterAndAccept();
+            return;
+        }
+        const std::string text = voiceText_;
+        cancelVoice();
+        if (!text.empty()) {
+            rememberLanguage(ic, text);
+            ic->commitString(text);
+        }
+    }
+
+    void startVoice(InputContext *ic, KeySym sym) {
+        endVoice();
+        voiceIc_ = ic->watch();
+        voiceSym_ = sym;
+        voiceHeld_ = true;
+        voicePressed_ = now(CLOCK_MONOTONIC);
+        if (!voice_.start()) {
+            showVoiceMessage("语音服务无法启动，请检查安装");
+            return;
+        }
+        voiceId_ = std::to_string(++voiceSerial_);
+        voiceRecording_ = true;
+        voiceState_ = VoiceState::Listening;
+        WLOG("voice start id=%s\n", voiceId_.c_str());
+        voice_.send("START " + voiceId_);
+        if (voiceState_ == VoiceState::Listening) renderVoice();
+    }
+
+    void releaseVoice() {
+        if (!voiceHeld_) return;
+        voiceHeld_ = false;
+        if (voiceState_ == VoiceState::Message) return;
+        if (now(CLOCK_MONOTONIC) - voicePressed_ < VOICE_TAP_USEC) {
+            cancelVoice();
+            return;
+        }
+        if (voiceRecording_) {
+            voiceRecording_ = false;
+            voice_.send("STOP " + voiceId_);
+        }
+        if (voiceState_ == VoiceState::Listening) {
+            voiceState_ = VoiceState::Recognizing;
+            renderVoice();
+        }
+    }
+
+    void onVoiceLine(const std::string &line) {
+        const auto message = wetype::parseVoiceLine(line);
+        if (!message || message->id != voiceId_ ||
+            (voiceState_ != VoiceState::Listening && voiceState_ != VoiceState::Recognizing)) return;
+        const auto &kind = message->kind;
+        if (kind == "LEVEL") {
+            voiceLevels_.push_back(std::atoi(message->payload.c_str()));
+            while (voiceLevels_.size() > 8) voiceLevels_.pop_front();
+        } else if (kind == "PARTIAL") {
+            if (auto text = wetype::hexDecode(message->payload)) voiceText_ = std::move(*text);
+        } else if (kind == "RECOGNIZING") {
+            // 松开后、或录满时长上限时，辅助进程结束录音。
+            voiceRecording_ = false;
+            voiceState_ = VoiceState::Recognizing;
+        } else if (kind == "FINAL") {
+            const auto text = wetype::hexDecode(message->payload);
+            finishVoice(text ? *text : voiceText_);
+            return;
+        } else if (kind == "ERROR") {
+            WLOG("voice error id=%s code=%s\n", voiceId_.c_str(), message->payload.c_str());
+            voiceRecording_ = false;
+            showVoiceMessage(wetype::voiceErrorText(message->payload));
+            return;
+        } else if (kind != "LISTENING") {
+            return;
+        }
+        renderVoice();
+    }
+
+    void onVoiceExit() {
+        if (voiceState_ == VoiceState::Listening || voiceState_ == VoiceState::Recognizing) {
+            voiceRecording_ = false;
+            showVoiceMessage("语音服务意外退出，请重试");
+        }
+    }
+
+    void finishVoice(const std::string &text) {
+        WLOG("voice final id=%s len=%zu\n", voiceId_.c_str(), text.size());
+        if (text.empty()) {
+            showVoiceMessage("没有听清，请再说一次");
+            return;
+        }
+        auto *ic = voiceIc_.get();
+        const bool held = voiceHeld_;
+        endVoice();
+        voiceHeld_ = held;   // 录满时长上限时键可能仍按着，之后的松开仍由语音吞掉
+        if (ic) {
+            rememberLanguage(ic, text);
+            ic->commitString(text);
+        }
+    }
+
+    void cancelVoice() {
+        if (voiceRecording_ || voiceState_ == VoiceState::Listening || voiceState_ == VoiceState::Recognizing)
+            voice_.send("CANCEL " + voiceId_);
+        endVoice();
+    }
+
+    // 回到空闲并清掉语音界面。
+    void endVoice() {
+        voiceTimer_.reset();
+        voiceRelease_.reset();
+        const bool shown = voiceState_ != VoiceState::Idle;
+        voiceState_ = VoiceState::Idle;
+        voiceHeld_ = voiceRecording_ = false;
+        voiceText_.clear();
+        voiceMessage_.clear();
+        voiceLevels_.clear();
+        auto *ic = voiceIc_.get();
+        voiceIc_ = TrackableObjectReference<InputContext>();
+        if (shown && ic) {
+            ic->inputPanel().reset();
+            ic->updatePreedit();
+            ic->updateUserInterface(UserInterfaceComponent::InputPanel);
+        }
+    }
+
+    void showVoiceMessage(const std::string &message) {
+        if (voiceRecording_) voice_.send("CANCEL " + voiceId_);
+        voiceRecording_ = false;
+        voiceState_ = VoiceState::Message;
+        voiceMessage_ = message;
+        voiceText_.clear();
+        renderVoice();
+        voiceTimer_ = instance_->eventLoop().addTimeEvent(
+            CLOCK_MONOTONIC, now(CLOCK_MONOTONIC) + VOICE_MESSAGE_USEC, 0,
+            [this](EventSourceTime *, uint64_t) {
+                auto keepAlive = std::move(voiceTimer_);
+                if (voiceState_ == VoiceState::Message) {
+                    const bool held = voiceHeld_;
+                    endVoice();
+                    voiceHeld_ = held;
+                }
+                return true;
+            });
+    }
+
+    void renderVoice() {
+        auto *ic = voiceIc_.get();
+        if (!ic) return;
+        std::string aux = "🎤 ";
+        if (voiceState_ == VoiceState::Listening)
+            aux += std::string(voiceText_.empty() ? "请说话 " : "正在听 ") + wetype::voiceMeter(voiceLevels_) + "  松开结束";
+        else if (voiceState_ == VoiceState::Recognizing) aux += "识别中…  Esc 取消";
+        else if (voiceState_ == VoiceState::Message) aux += voiceMessage_;
+        else return;
+        auto &panel = ic->inputPanel();
+        const bool hadClientPreedit = !panel.clientPreedit().empty();
+        panel.reset();
+        panel.setAuxUp(Text(aux));
+        const bool inInput = ic->capabilityFlags().test(CapabilityFlag::Preedit) && ic->isPreeditEnabled();
+        if (!voiceText_.empty() && voiceState_ != VoiceState::Message) {
+            // 识别中的文字直接显示在输入框里（不支持预编辑的程序显示在候选窗）。
+            Text preedit(voiceText_, TextFormatFlag::Underline);
+            preedit.setCursor(static_cast<int>(preedit.textLength()));
+            if (inInput) panel.setClientPreedit(preedit);
+            else panel.setPreedit(preedit);
+        }
+        if (inInput || hadClientPreedit) ic->updatePreedit();
+        ic->updateUserInterface(UserInterfaceComponent::InputPanel);
+    }
 
     // 数字常用语：空闲时连续输入的数字（已上屏）及命中的 (需删除的已输入位数, 常用语全文)。
     std::string digitRun_;

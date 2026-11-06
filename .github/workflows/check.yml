@@ -16,7 +16,7 @@ jobs:
       - name: 安装检查依赖
         run: |
           sudo apt-get update
-          sudo apt-get install -y build-essential cmake libfcitx5core-dev python3-cryptography libsnappy1v5 xvfb xclip python3-gi gir1.2-gtk-3.0
+          sudo apt-get install -y build-essential cmake libfcitx5core-dev python3-cryptography libsnappy1v5 libopus0 xvfb xclip python3-gi gir1.2-gtk-3.0
       - name: 安装 Wayland 隔离检查依赖
         if: matrix.os == 'ubuntu-24.04'
         run: sudo apt-get install -y sway wl-clipboard
