@@ -66,6 +66,33 @@ def test_engine(args):
                 engine.close()
             print("PASS 双拼词条学习及重启持久化", flush=True)
 
+    # 自然码（官方方案 5）：韵母键位与小鹤不同，同一编码在两种方案下结果不同。
+    os.environ["WETYPE_DOUBLE_PIN"] = "5"
+    with tempfile.TemporaryDirectory(prefix="vtype-double-pin.") as directory:
+        work = Path(directory) / "dict"
+        (work / "userdict/v5").mkdir(parents=True)
+        (work / "userdict/user_hot_word").mkdir(parents=True)
+        with (Path(directory) / "engine.log").open("wb") as log:
+            engine = Engine(args.engine_dir, work, False, None, log, harness=args.harness)
+            try:
+                engine.command("OPT spans", "OK")
+                for code, expected in [("nihk", "你好"), ("vsgo", "中国"), ("vswf", "中文"),
+                                       ("uijx", "世界"), ("bzjy", "北京"), ("oubk", "欧包"),
+                                       ("aigo", "爱国"), ("ah", "昂")]:
+                    engine.command("C", "OK")
+                    assert engine.candidates(code)[0] == (len(code), expected), code
+                engine.command("C", "OK")
+                assert (4, "你好") not in engine.candidates("nihc")[:3]
+                engine.command("C", "OK")
+                words = engine.candidates("nihkvsgo")
+                partial = words.index((4, "你好"))
+                remaining = engine.command(f"S {partial}", "CAND")
+                assert "4:中国" in remaining.split("\t")[1:], remaining
+                engine.command("S 0", "OK")
+            finally:
+                engine.close()
+            print("PASS 自然码逐键、零声母、部分选词，且不沿用小鹤键位", flush=True)
+
 
 def test_fcitx(args):
     import dbus
@@ -160,6 +187,14 @@ def test_fcitx(args):
                 scheme("小鹤双拼")
                 assert "PinyinScheme=小鹤双拼" in (config / "conf/wetype.conf").read_text()
                 print("PASS 全拼回归、热切换及配置保存", flush=True)
+
+                scheme("自然码双拼")
+                client.type("nihk")
+                assert "ni hk" in preedits, preedits
+                client.press("space", delay=0.5)
+                assert client.commits[-1] == "你好", client.commits
+                assert "PinyinScheme=自然码双拼" in (config / "conf/wetype.conf").read_text()
+                print("PASS 自然码图形配置、两键分段、上屏及配置保存", flush=True)
             except BaseException:
                 print("\n".join((root / "fcitx.log").read_text(errors="replace").splitlines()[-35:]))
                 raise

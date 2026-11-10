@@ -530,7 +530,7 @@ public:
     explicit WeTypeEngine(Instance *instance)
         : instance_(instance), eng_(instance->eventLoop()) {
         readAsIni(config_, "conf/wetype.conf");
-        eng_.setDoublePinSolution(*config_.pinyinScheme == PinyinScheme::Flypy ? 3 : 0);
+        eng_.setDoublePinSolution(doublePinSolution(*config_.pinyinScheme));
         eng_.setFuzzyFlags(config_.fuzzyFlags());
         signal(SIGPIPE, SIG_IGN);
         if (!instance_->inputContextManager().registerProperty("wetype-punctuation-state", &punctuationFactory_)) {
@@ -720,7 +720,7 @@ private:
         }
         restartSource_.reset();
         eng_.stop();
-        eng_.setDoublePinSolution(*config_.pinyinScheme == PinyinScheme::Flypy ? 3 : 0);
+        eng_.setDoublePinSolution(doublePinSolution(*config_.pinyinScheme));
         eng_.setFuzzyFlags(config_.fuzzyFlags());
         ensureEngine();
     }
@@ -783,7 +783,7 @@ private:
         panel.reset();
         // Frontends may commit preedit on focus-out; include all consumed text.
         Text preedit = pending_ ? Text(pendingRaw())
-                                : pinyinPreedit(buf_, *config_.pinyinScheme == PinyinScheme::Flypy, cursor_);
+                                : pinyinPreedit(buf_, isDoublePin(*config_.pinyinScheme), cursor_);
         const bool inInput = *config_.showPinyinInInput &&
                              ic.capabilityFlags().test(CapabilityFlag::Preedit) &&
                              ic.isPreeditEnabled();
@@ -1982,14 +1982,14 @@ void WeTypeEngine::processKey(KeyEvent &event) {
             return;
         } else if (sym == FcitxKey_Left) {
             cursorEditing_ = true;
-            const bool doublePin = (*config_.pinyinScheme == PinyinScheme::Flypy);
+            const bool doublePin = isDoublePin(*config_.pinyinScheme);
             cursor_ = previousPinyinWord(buf_, cursor_, doublePin);
             updateUI(*ic);
             event.filterAndAccept();
             return;
         } else if (sym == FcitxKey_Right) {
             cursorEditing_ = true;
-            const bool doublePin = (*config_.pinyinScheme == PinyinScheme::Flypy);
+            const bool doublePin = isDoublePin(*config_.pinyinScheme);
             cursor_ = nextPinyinWord(buf_, cursor_, doublePin);
             updateUI(*ic);
             event.filterAndAccept();
@@ -2003,7 +2003,7 @@ void WeTypeEngine::processKey(KeyEvent &event) {
         !event.key().states().testAny(KeyStates{KeyState::Ctrl, KeyState::Super,
                                                 KeyState::Super2, KeyState::Hyper,
                                                 KeyState::Hyper2, KeyState::Mod5})) {
-        const bool doublePin = (*config_.pinyinScheme == PinyinScheme::Flypy);
+        const bool doublePin = isDoublePin(*config_.pinyinScheme);
         if (sym == FcitxKey_b || sym == FcitxKey_B || sym == FcitxKey_Left) {
             cursorEditing_ = true;
             cursor_ = previousPinyinWord(buf_, cursor_, doublePin);
