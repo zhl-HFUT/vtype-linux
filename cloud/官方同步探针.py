@@ -139,6 +139,15 @@ class Probe:
 
     def request(self, path, plain, command=None, service_command=4814):
         encrypted = path != "/timestamp"
+        body, headers = self.prepare(path, plain, command, service_command)
+        with self.http.open(urllib.request.Request("https://wetype.weixin.qq.com"+path, data=body, headers=headers), timeout=getattr(self,"timeout",20)) as response:
+            data = response.read(2*1024*1024+1)
+            compression = response.headers.get("Kb-CompressionType", "1")
+        return self.finish(data, compression, encrypted)
+
+    def prepare(self, path, plain, command=None, service_command=4814):
+        """加密请求体并生成签名请求头；返回 (body, headers)。"""
+        encrypted = path != "/timestamp"
         body = aes(plain, self.key, True) if encrypted else plain
         headers = {"Kb-OsType":"1", "Kb-Version":VERSION, "Kb-SystemVersion":"34",
                    "Kb-PackageType":"2", "Kb-TimeStamp":str(self.timestamp()),
@@ -149,11 +158,12 @@ class Probe:
             headers.update({"Kb-Uin":str(self.identity["uin"]), "Kb-CmdId":str(service_command), "Kb-SubCmdId":str(command), "Kb-SharedKeySuffix":self.key[-4:].decode()})
             order = ["Kb-OsType", "Kb-Version", "Kb-Scene", "Kb-CmdId", "Kb-SubCmdId", "Kb-TimeStamp", "Kb-BodyMd5", "Kb-Uin", "Kb-TraceId", "Kb-TaskId"]
             headers["Kb-Sign"] = hashlib.sha256(("".join(headers[k] for k in order)+SALT).encode()).hexdigest().upper()
-        with self.http.open(urllib.request.Request("https://wetype.weixin.qq.com"+path, data=body, headers=headers), timeout=getattr(self,"timeout",20)) as response:
-            data = response.read(2*1024*1024+1)
-            if len(data)>2*1024*1024:
-                raise ValueError("response too large")
-            compression = response.headers.get("Kb-CompressionType", "1")
+        return body, headers
+
+    def finish(self, data, compression, encrypted=True):
+        """解密、解压响应，并推进任务序号。"""
+        if len(data)>2*1024*1024:
+            raise ValueError("response too large")
         if encrypted:
             data = aes(data, self.key, False)
         if compression == "2":

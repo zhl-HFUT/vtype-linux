@@ -67,6 +67,7 @@
           pkg-config
           openssl
           snappy
+          libopus
           qemu-user
           e2fsprogs
           unzip
@@ -86,6 +87,7 @@
           ]))
         ];
         WETYPE_SNAPPY_LIBRARY = "${pkgs.lib.getLib pkgs.snappy}/lib/libsnappy${pkgs.stdenv.hostPlatform.extensions.sharedLibrary}";
+        WETYPE_OPUS_LIBRARY = "${pkgs.lib.getLib pkgs.libopus}/lib/libopus${pkgs.stdenv.hostPlatform.extensions.sharedLibrary}";
       };
       formatter.${system} = pkgs.nixfmt;
     };

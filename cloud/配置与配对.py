@@ -77,7 +77,10 @@ def main(argv=None):
     clipboard = commands.add_parser('clipboard', help='独立管理跨设备文本剪贴板同步', add_help=False)
     clipboard.add_argument('-h', '--help', dest='clipboard_help', action='store_true')
     clipboard.add_argument('arguments', nargs=argparse.REMAINDER)
-    args = parser.parse_args(argv)
+    commands.add_parser('voice', help='在线语音识别（会把录音发给官方服务器）', add_help=False)
+    args, extra = parser.parse_known_args(argv)
+    if extra and args.action != 'voice':
+        parser.error('无法识别的参数：' + ' '.join(extra))
     p.STATE = args.state.expanduser().resolve()
     os.environ['WETYPE_STATE_DIR'] = str(p.STATE)
     path = config_path()
@@ -85,6 +88,9 @@ def main(argv=None):
         from 剪贴板同步 import main as clipboard_main
         return clipboard_main(['--help'] if args.clipboard_help else args.arguments,
                               state=p.STATE, entry=Path(sys.argv[0]).resolve())
+    if args.action == 'voice':
+        from 语音识别 import main as voice_main
+        return voice_main(extra, state=p.STATE)
     if args.action == 'status':
         config = json.loads(path.read_text()) if path.exists() else {}
         print(json.dumps({'paired': (p.STATE / 'identity.json').is_file(),

@@ -15,6 +15,7 @@
   coreutils,
   openssl,
   snappy,
+  libopus,
   wxc,
   src,
 }:
@@ -89,7 +90,8 @@ stdenv.mkDerivation (finalAttrs: {
         ]
       } \
       --set-default WETYPE_WXC ${wxc}/bin/wxc \
-      --set WETYPE_SNAPPY_LIBRARY ${lib.getLib snappy}/lib/libsnappy.so
+      --set WETYPE_SNAPPY_LIBRARY ${lib.getLib snappy}/lib/libsnappy.so \
+      --set WETYPE_OPUS_LIBRARY ${lib.getLib libopus}/lib/libopus.so
     makeWrapper "$out/libexec/wetype-python" "$out/bin/wetype-cloud" \
       --add-flags "$out/share/vtype-linux/wetype-cloud.py"
     makeWrapper "$out/libexec/wetype-python" "$out/bin/wetype-setup" \

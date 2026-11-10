@@ -24,6 +24,10 @@ FCITX_CONFIGURATION(WeTypeConfig,
         this, "ArrowKeysMoveCursor", "方向键左右移动拼音光标", true};
     Option<bool> readlineKeyBindings{
         this, "ReadlineKeyBindings", "启用 Readline 快捷键 (Ctrl+A/E/B/F/D/H/K/U, Alt+B/F)", true};
+    // 语音输入：默认不设按键即关闭；按住说话、松开结束。
+    KeyListOption voiceInputKey{
+        this, "VoiceInputKey", "语音输入快捷键", {},
+        KeyListConstrain({KeyConstrainFlag::AllowModifierLess, KeyConstrainFlag::AllowModifierOnly})};
     KeyListOption prevPage{
         this, "PrevPage", "上一页",
         {Key(FcitxKey_minus), Key(FcitxKey_KP_Subtract), Key(FcitxKey_Up), Key(FcitxKey_Page_Up)},
