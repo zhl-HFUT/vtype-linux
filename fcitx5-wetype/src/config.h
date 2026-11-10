@@ -10,8 +10,18 @@
 
 namespace fcitx {
 
-enum class PinyinScheme { FullPinyin, Flypy };
-FCITX_CONFIG_ENUM_NAME_WITH_I18N(PinyinScheme, N_("全拼"), N_("小鹤双拼"));
+enum class PinyinScheme { FullPinyin, Flypy, NatureCode };
+FCITX_CONFIG_ENUM_NAME_WITH_I18N(PinyinScheme, N_("全拼"), N_("小鹤双拼"), N_("自然码双拼"));
+
+// 官方 3.5.4 SessionConfig.DoublePinSolution：0=全拼，3=小鹤，5=自然码。
+inline int doublePinSolution(PinyinScheme scheme) {
+    switch (scheme) {
+    case PinyinScheme::Flypy: return 3;
+    case PinyinScheme::NatureCode: return 5;
+    default: return 0;
+    }
+}
+inline bool isDoublePin(PinyinScheme scheme) { return doublePinSolution(scheme) != 0; }
 
 FCITX_CONFIGURATION(WeTypeConfig,
     OptionWithAnnotation<PinyinScheme, PinyinSchemeI18NAnnotation> pinyinScheme{
