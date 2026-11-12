@@ -165,3 +165,30 @@ set_mode("normal")
 hold(c)
 assert c.commits == ["录满了", "你好世界。"], c.commits
 print("PASS 录满时长上限")
+
+# 13. 全局生效：在非微信输入法（如 keyboard-us 或英文直通）下按住语音键仍可语音输入并上屏。
+c.commits.clear()
+controller.SetCurrentIM("keyboard-us")
+pump(0.3)
+hold(c)
+assert c.commits == ["你好世界。"], c.commits
+print("PASS 全局生效：keyboard-us 模式下语音输入正常上屏")
+
+# 14. 配置控制：当 VoiceInputGlobal=False 时，非微信输入法下不接管语音键。
+controller.SetConfig("fcitx://config/addon/wetype", dbus.Dictionary(
+    {"VoiceInputKey": dbus.Dictionary({"0": "Control_R"}, signature="sv"),
+     "VoiceInputGlobal": "False"}, signature="sv"))
+pump(0.3)
+c.commits.clear()
+before = len(trace())
+assert not c.press(CONTROL_R, delay=0.3), "关闭全局后非微信输入法不应接管语音键"
+c.press(CONTROL_R, delay=0.2, states=CTRL, release=True)
+assert len(trace()) == before, trace()[before:]
+assert not c.commits, c.commits
+# 且微信拼音本身仍能正常接管语音键
+controller.SetCurrentIM("wetype-im")
+pump(0.3)
+c.commits.clear()
+hold(c)
+assert c.commits == ["你好世界。"], c.commits
+print("PASS 配置控制：关闭全局后仅微信输入法接管语音键")

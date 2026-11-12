@@ -38,6 +38,8 @@ FCITX_CONFIGURATION(WeTypeConfig,
     KeyListOption voiceInputKey{
         this, "VoiceInputKey", "语音输入快捷键", {},
         KeyListConstrain({KeyConstrainFlag::AllowModifierLess, KeyConstrainFlag::AllowModifierOnly})};
+    Option<bool> voiceInputGlobal{
+        this, "VoiceInputGlobal", "在所有输入法及英文状态下均可使用语音输入", true};
     KeyListOption prevPage{
         this, "PrevPage", "上一页",
         {Key(FcitxKey_minus), Key(FcitxKey_KP_Subtract), Key(FcitxKey_Up), Key(FcitxKey_Page_Up)},

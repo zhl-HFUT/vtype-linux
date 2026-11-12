@@ -546,6 +546,16 @@ public:
         voice_.setOnExit([this] { onVoiceExit(); });
         voiceWatcher_=instance_->watchEvent(EventType::InputContextKeyEvent,EventWatcherPhase::PreInputMethod,
             [this](Event &event) { voiceKey(static_cast<KeyEvent &>(event)); });
+        focusWatcher_ = instance_->watchEvent(
+            EventType::InputContextFocusOut, EventWatcherPhase::Default,
+            [this](Event &event) {
+                auto *ic = static_cast<InputContextEvent &>(event).inputContext();
+                if (ic && voiceState_ != VoiceState::Idle && voiceIc_.get() == ic) {
+                    cancelVoice();
+                } else if (voiceState_ == VoiceState::Idle) {
+                    voiceHeld_ = false;
+                }
+            });
         // 在 Fcitx 全局中英开关之前处理单独轻按的 Shift，仅作用于微信输入法；Ctrl+Space 交给 Fcitx。
         modeWatcher_=instance_->watchEvent(EventType::InputContextKeyEvent,EventWatcherPhase::PreInputMethod,
             [this](Event &event) {
@@ -630,6 +640,7 @@ public:
     }
     ~WeTypeEngine() override {
         voiceWatcher_.reset();
+        focusWatcher_.reset();
         voiceTimer_.reset();
         voiceRelease_.reset();
         voice_.stop();
@@ -1453,7 +1464,7 @@ private:
     static constexpr uint64_t VOICE_RELEASE_USEC = 40000;   // X11 自动重复会插入成对的松开/按下
     static constexpr uint64_t VOICE_MESSAGE_USEC = 2500000;
     VoiceHelper voice_{instance_->eventLoop()};
-    std::unique_ptr<HandlerTableEntry<EventHandler>> voiceWatcher_;
+    std::unique_ptr<HandlerTableEntry<EventHandler>> voiceWatcher_, focusWatcher_;
     std::unique_ptr<EventSourceTime> voiceTimer_, voiceRelease_;
     VoiceState voiceState_ = VoiceState::Idle;
     TrackableObjectReference<InputContext> voiceIc_;
@@ -1481,8 +1492,10 @@ private:
     void voiceKey(KeyEvent &event) {
         if (voiceState_ == VoiceState::Idle && !voiceHeld_ && (event.isRelease() || config_.voiceInputKey->empty())) return;
         auto *ic = event.inputContext();
+        if (!ic || ic->capabilityFlags().test(CapabilityFlag::Password)) return;
         const auto *entry = instance_->inputMethodEntry(ic);
-        if (!entry || entry->uniqueName() != "wetype-im") return;
+        const bool isWeType = (entry && entry->uniqueName() == "wetype-im");
+        if (voiceState_ == VoiceState::Idle && !voiceHeld_ && !isWeType && !*config_.voiceInputGlobal) return;
         const KeySym sym = event.key().sym();
         if (voiceHeld_ && sym == voiceSym_) {
             event.filterAndAccept();
@@ -1505,7 +1518,14 @@ private:
         if (voiceState_ == VoiceState::Idle) {
             if (!event.key().checkKeyList(*config_.voiceInputKey)) return;
             // 正在拼写时按键照常交给拼音；密码框不录音。
-            if (ic->capabilityFlags().test(CapabilityFlag::Password) || !buf_.empty() || pending_) return;
+            if (ic->capabilityFlags().test(CapabilityFlag::Password)) return;
+            if (isWeType) {
+                if (!buf_.empty() || pending_) return;
+            } else {
+                // 非微信输入法时，若当前有预编辑或正在组词，不打断用户当前的输入
+                const auto &panel = ic->inputPanel();
+                if (!panel.clientPreedit().empty() || !panel.preedit().empty() || panel.candidateList()) return;
+            }
             startVoice(ic, sym);
             event.filterAndAccept();
             return;
@@ -1553,7 +1573,9 @@ private:
         if (!voiceHeld_) return;
         voiceHeld_ = false;
         if (voiceState_ == VoiceState::Message) return;
-        if (now(CLOCK_MONOTONIC) - voicePressed_ < VOICE_TAP_USEC) {
+        const auto dur = now(CLOCK_MONOTONIC) - voicePressed_;
+        WLOG("releaseVoice held=%d dur=%llu tap=%llu\n", voiceHeld_, (unsigned long long)dur, (unsigned long long)VOICE_TAP_USEC);
+        if (dur < VOICE_TAP_USEC) {
             cancelVoice();
             return;
         }
