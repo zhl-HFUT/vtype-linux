@@ -133,7 +133,19 @@ int main() {
         selRow = (selRow + 1) % actualRows; // 下一行 -> 0
         if (selRow != 0) throw std::runtime_error("nextRow loop from 3 failed");
 
-        std::cout << "PASS paging_config: default keys, custom comma/period, bracket keys, multi-row matrix config\n";
+        // 7. 候选优化与选词增强配置验证
+        WeTypeConfig optConf;
+        if (*optConf.undoCommitOnBackspace != true) throw std::runtime_error("default undoCommitOnBackspace should be true");
+        if (*optConf.promoteUserSelection != true) throw std::runtime_error("default promoteUserSelection should be true");
+
+        RawConfig optRaw;
+        optRaw["UndoCommitOnBackspace"].setValue("False");
+        optRaw["PromoteUserSelection"].setValue("False");
+        optConf.load(optRaw, true);
+        if (*optConf.undoCommitOnBackspace != false) throw std::runtime_error("custom undoCommitOnBackspace should be false");
+        if (*optConf.promoteUserSelection != false) throw std::runtime_error("custom promoteUserSelection should be false");
+
+        std::cout << "PASS paging_config: default keys, custom comma/period, bracket keys, multi-row matrix config, selection optimization config\n";
         return 0;
     } catch (const std::exception &err) {
         std::cerr << "FAIL " << err.what() << '\n';

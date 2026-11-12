@@ -312,7 +312,7 @@ def recorder_command():
     override = os.environ.get('WETYPE_VOICE_RECORDER')
     if override:
         return override.split()
-    candidates = (['pw-record', '--raw', '--rate', str(SAMPLE_RATE), '--channels', '1', '--format', 's16', '--latency', '20ms', '-'],
+    candidates = (['pw-record', '--rate', str(SAMPLE_RATE), '--channels', '1', '--format', 's16', '--latency', '20ms', '-'],
                   ['parecord', '--raw', '--rate', str(SAMPLE_RATE), '--channels', '1', '--format', 's16le', '--latency-msec', '20'],
                   ['arecord', '-q', '-t', 'raw', '-r', str(SAMPLE_RATE), '-c', '1', '-f', 'S16_LE'])
     for command in candidates:

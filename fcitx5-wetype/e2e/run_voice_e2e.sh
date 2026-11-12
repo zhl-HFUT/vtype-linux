@@ -7,4 +7,5 @@ FIXTURE="$(mktemp -d /tmp/wetype-voice-e2e.XXXXXX)"
 trap 'rm -rf "$FIXTURE"' EXIT
 export WETYPE_VOICE_FIXTURE_DIR="$FIXTURE"
 export WETYPE_VOICE_HELPER="$HERE/voice_helper_fixture.py"
+export WETYPE_E2E_KEYBOARD=1
 WETYPE_E2E_SCRIPT="$HERE/voice_test.py" bash "$HERE/run_paging_e2e.sh"
