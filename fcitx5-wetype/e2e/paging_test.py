@@ -16,7 +16,7 @@ KEY = {"a": 97, "i": 105, "h": 104, "n": 110, "o": 111, "1": 49, "2": 50, "3": 5
        "up": 0xFF52, "right": 0xFF53, "left": 0xFF51, "tab": 0xFF09,
        "home": 0xFF50, "end": 0xFF57, "delete": 0xFFFF, "backspace": 0xFF08,
        "space": 32, "4": 52, "s": 115, "r": 114, "u": 117, "f": 102, "b": 98,
-       "y": 121, "e": 101, "p": 112, "j": 106}
+       "y": 121, "e": 101, "p": 112, "j": 106, "t": 116}
 
 DBusGMainLoop(set_as_default=True)
 bus = dbus.SessionBus()
@@ -56,8 +56,8 @@ path, _ = IM.CreateInputContext([("program", "wetype-pagetest"),
 ic = dbus.Interface(bus.get_object("org.fcitx.Fcitx5", path),
                     "org.fcitx.Fcitx.InputContext1")
 # CreateInputContext's metadata does not set capabilities on all Fcitx5
-# versions. Explicitly enable client-side candidate UI for signal assertions.
-ic.SetCapability(dbus.UInt64(1 | (1 << 39)))
+# versions. Explicitly enable client-side candidate UI and surrounding text for signal assertions.
+ic.SetCapability(dbus.UInt64(1 | (1 << 39) | (1 << 6)))
 ic.FocusIn()
 time.sleep(0.5)
 
@@ -531,6 +531,115 @@ press("1")
 pump(0.8)
 got = indexes()
 check("多行候选自定义Alt+J切换至下一行选词为index 10", len(got) > before and got[-1] == 10, "index=%s" % (got[-1] if got else -1))
+
+# 清理配置，恢复单行默认状态
+if os.path.exists(wetype_conf):
+    os.remove(wetype_conf)
+CTL.ReloadAddonConfig("wetype")
+pump(0.3)
+
+# 测试 1: 用户高频选词置顶记忆 (PromoteUserSelection)
+press("esc")
+commits.clear()
+def fresh_tb():
+    offset = os.path.getsize(LOG)
+    press("t")
+    press("b")
+    for _ in range(40):
+        pump(0.2)
+        if candidate_count(offset, 2) >= 1:
+            break
+
+fresh_tb()
+press("2")
+pump(0.8)
+target_cand = commits[-1] if commits else ""
+
+# 输入其他字符并确认提交，触发置顶记忆落盘
+press("a")
+press("space")
+pump(0.5)
+
+# 再次输入 "tb"，测试置顶候选词是否成为首选项（直接按空格提交）
+commits.clear()
+fresh_tb()
+press("space")
+pump(0.8)
+check("用户选词记忆：再次输入tb时上次选中的候选词被置顶到首位并直接空格上屏",
+      bool(target_cand) and commits and commits[-1] == target_cand,
+      "expected=%s got=%s" % (target_cand, commits[-1] if commits else ""))
+press("esc")
+
+# 测试 2: 退格键撤销刚上屏的词并恢复候选 (UndoCommitOnBackspace)
+press("esc")
+commits.clear()
+fresh()
+# 按空格上屏首选
+press("space")
+pump(0.8)
+first_commit = commits[-1] if commits else ""
+check("正常按空格上屏首选", bool(first_commit), "commit=%s" % first_commit)
+
+# 模拟客户端已写入该词并更新周围文本光标位于词后
+ic.SetSurroundingText(first_commit, len(first_commit), len(first_commit))
+pump(0.3)
+
+# 此时 buf_ 为空，按 BackSpace 撤销上屏并恢复候选
+press("backspace")
+pump(0.8)
+check("退格键撤销上屏：恢复候选列表且不漏键",
+      len(ui_candidates) > 0, "candidates=%d" % len(ui_candidates))
+
+# 此时候选已恢复，直接按 2 选第二项
+before_commits = len(commits)
+press("2")
+pump(0.8)
+check("撤销后按数字直接上屏目标候选词",
+      len(commits) > before_commits and commits[-1] != first_commit,
+      "commits=%s first_commit=%s" % (str(commits), first_commit))
+
+# 测试 3: 无周围文本协议支持的客户端 (如终端、Edge、Electron等) 下的降级退格撤销
+ic.SetCapability(dbus.UInt64(1 | (1 << 39))) # 移除 (1 << 6) SurroundingText
+pump(0.3)
+press("esc")
+commits.clear()
+fresh()
+press("space")
+pump(0.8)
+fallback_commit = commits[-1] if commits else ""
+check("无周围文本客户端按空格上屏首选", bool(fallback_commit), "commit=%s" % fallback_commit)
+# 此时客户端未提供周围文本，直接按 BackSpace 触发模拟退格并恢复候选
+press("backspace")
+pump(0.8)
+check("无周围文本客户端退格成功恢复候选框", len(ui_candidates) > 0, "candidates=%d" % len(ui_candidates))
+press("2")
+pump(0.8)
+check("无周围文本客户端撤销后按数字直接上屏第2候选",
+      len(commits) > 1 and commits[-1] != fallback_commit,
+      "commits=%s fallback_commit=%s" % (str(commits), fallback_commit))
+
+# 恢复周围文本能力
+ic.SetCapability(dbus.UInt64(1 | (1 << 39) | (1 << 6)))
+pump(0.3)
+
+# 测试 4: 配置 UndoCommitOnBackspace=False 时退格不撤销
+with open(wetype_conf, "w") as f:
+    f.write("UndoCommitOnBackspace=False\n")
+CTL.ReloadAddonConfig("wetype")
+pump(0.3)
+
+press("esc")
+commits.clear()
+fresh()
+press("space")
+pump(0.8)
+first_commit = commits[-1] if commits else ""
+ic.SetSurroundingText(first_commit, len(first_commit), len(first_commit))
+pump(0.3)
+press("backspace")
+pump(0.5)
+check("配置关闭UndoCommitOnBackspace时退格不恢复候选",
+      len(ui_candidates) == 0, "candidates=%d" % len(ui_candidates))
 
 # 清理配置
 if os.path.exists(wetype_conf):

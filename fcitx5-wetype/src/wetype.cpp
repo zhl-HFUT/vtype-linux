@@ -59,6 +59,9 @@
 #include "config.h"
 #include "pinyin_preedit.h"
 #include "voice_input.h"
+#include "user_selection.h"
+#include <chrono>
+#include <optional>
 
 namespace fcitx {
 
@@ -590,6 +593,8 @@ public:
         commonPhrases_.setPath(dataHome + "/wetype-ime/common-phrases.bin");
         const std::size_t glossCount = glossary_.load(dataHome + "/wetype-ime/glossary-en.tsv");
         if (glossCount) WLOG("glossary loaded: %zu entries\n", glossCount);
+        userSelection_.setPath(dataHome + "/wetype-ime/user_selection.tsv");
+        userSelection_.load();
         std::string eng, dicts, work, qemu, sysroot;
         resolveDirs(eng, dicts, work, qemu, sysroot);
         syncDir_ = work + "/../sync-control";
@@ -628,6 +633,8 @@ public:
         voiceTimer_.reset();
         voiceRelease_.reset();
         voice_.stop();
+        flushPendingLearn();
+        userSelection_.save();
         syncTimer_.reset();
         cloudTimer_.reset();
         if (syncLock_ >= 0) close(syncLock_);
@@ -677,6 +684,9 @@ public:
 
     // 失焦/切换 IM: 彻底清理, 候选框随之消失
     void deactivate(const InputMethodEntry &entry, InputContextEvent &event) override {
+        flushPendingLearn();
+        userSelection_.save();
+        restorableCommit_.reset();
         auto *ic = event.inputContext();
         if (!ic) return;
         // 失焦或切换输入法时放弃本次语音，不把结果上屏到别处。
@@ -964,12 +974,35 @@ private:
     void commitCandidate(InputContext *ic, int index) {
         if (!candidatesCurrent_ || index < 0 || index >= static_cast<int>(cands_.size())) return;
         if ((index < static_cast<int>(engineIndices_.size()) && engineIndices_[index] < 0)) {
+            if (*config_.undoCommitOnBackspace) {
+                restorableCommit_ = RestorableCommit{
+                    cands_[index],
+                    buf_,
+                    cursor_,
+                    std::chrono::steady_clock::now()
+                };
+            } else {
+                restorableCommit_.reset();
+            }
             commitText(ic, cands_[index]); return;
         }
         const int cover = index < static_cast<int>(covers_.size()) ? covers_[index] : 0;
         WLOG("commit candidate index=%d count=%zu cover=%d buffer_len=%zu revision=%llu\n", index,
              cands_.size(), cover, buf_.size(), static_cast<unsigned long long>(revision_));
         if (cover <= 0 || static_cast<size_t>(cover) >= buf_.size()) {
+            if (*config_.undoCommitOnBackspace) {
+                restorableCommit_ = RestorableCommit{
+                    cands_[index],
+                    buf_,
+                    cursor_,
+                    std::chrono::steady_clock::now()
+                };
+            } else {
+                restorableCommit_.reset();
+            }
+            if (*config_.promoteUserSelection && index >= 0 && index < static_cast<int>(cands_.size()) && cands_[index] != buf_) {
+                pendingLearn_ = PendingLearn{buf_, cands_[index]};
+            }
             eng_.send(selectionCommand(index), nullptr);
             commitText(ic, cands_[index]);
             return;
@@ -977,6 +1010,12 @@ private:
         // The candidate covers only a prefix (e.g. 你好 of nihaoshijie): commit
         // it and keep composing the rest. The engine answers S with the
         // candidates for the remaining pinyin.
+        if (*config_.promoteUserSelection && cover > 0 && cover <= static_cast<int>(buf_.size())) {
+            const std::string prefixPinyin = buf_.substr(0, cover);
+            if (prefixPinyin != cands_[index]) {
+                userSelection_.record(prefixPinyin, cands_[index]);
+            }
+        }
         rememberLanguage(ic, cands_[index]);
         ic->commitString(cands_[index]);
         ++revision_;
@@ -1126,6 +1165,23 @@ private:
             }
             applyTypedCase(expectedBuf);
             if (current) {
+                if (*config_.promoteUserSelection) {
+                    if (const auto *fav = userSelection_.lookup(buf_)) {
+                        auto it = std::find(cands_.begin(), cands_.end(), *fav);
+                        if (it != cands_.end() && it != cands_.begin()) {
+                            const size_t pos = std::distance(cands_.begin(), it);
+                            std::string cand = std::move(cands_[pos]);
+                            int cover = covers_[pos];
+                            int engIdx = engineIndices_[pos];
+                            cands_.erase(cands_.begin() + pos);
+                            covers_.erase(covers_.begin() + pos);
+                            engineIndices_.erase(engineIndices_.begin() + pos);
+                            cands_.insert(cands_.begin(), std::move(cand));
+                            covers_.insert(covers_.begin(), cover);
+                            engineIndices_.insert(engineIndices_.begin(), engIdx);
+                        }
+                    }
+                }
                 auto phrases = commonPhrases_.automaticLookup(buf_);
                 // 常用语不交给普通词库学习；保留每个原生候选的真实序号。
                 for (auto it=phrases.rbegin(); it!=phrases.rend(); ++it) {
@@ -1638,6 +1694,32 @@ private:
     std::vector<std::pair<size_t, std::string>> digitHits_;
     int digitSelected_ = 0;
 
+    struct RestorableCommit {
+        std::string text;
+        std::string pinyin;
+        int cursor = 0;
+        std::chrono::steady_clock::time_point time;
+    };
+    std::optional<RestorableCommit> restorableCommit_;
+
+    struct PendingLearn {
+        std::string pinyin;
+        std::string text;
+    };
+    std::optional<PendingLearn> pendingLearn_;
+
+    wetype::UserSelection userSelection_;
+
+    void flushPendingLearn() {
+        if (pendingLearn_) {
+            if (*config_.promoteUserSelection) {
+                userSelection_.record(pendingLearn_->pinyin, pendingLearn_->text);
+                userSelection_.save();
+            }
+            pendingLearn_.reset();
+        }
+    }
+
     void resetDigitRun(InputContext *ic) {
         const bool shown = !digitHits_.empty();
         digitRun_.clear(); digitHits_.clear(); digitSelected_ = 0;
@@ -1695,6 +1777,8 @@ private:
     }
 
     void clearAll(InputContext *ic = nullptr) {
+        flushPendingLearn();
+        restorableCommit_.reset();
         digitRun_.clear(); digitHits_.clear(); digitSelected_ = 0;
         cancelPending();
         ++epoch_;
@@ -1704,6 +1788,7 @@ private:
         cursorEditing_ = false;
         cands_.clear();
         covers_.clear();
+        engineIndices_.clear();
         candidatesCurrent_ = false;
         windowStart_ = 0;
         selected_ = 0;
@@ -1733,6 +1818,11 @@ void WeTypeEngine::processKey(KeyEvent &event) {
     if (icRef_.get() != ic) clearAll();
     icRef_ = ic->watch();
     if (digitPhraseKey(event, ic)) return;
+
+    if (!event.isRelease() && sym != FcitxKey_BackSpace && !Key(sym).isModifier()) {
+        flushPendingLearn();
+        restorableCommit_.reset();
+    }
 
     if (pending_) {
         const bool shortcut = event.key().states().testAny(KeyStates{
@@ -2257,7 +2347,7 @@ void WeTypeEngine::processKey(KeyEvent &event) {
                 handled = true;
             }
         }
-        // 退格: 删除光标前字符，C 重建 + 前缀重放
+        // 退格: 删除光标前字符，C 重建 + 前缀重放；当拼音为空且开启撤销时，撤销刚上屏的候选词
         else if (sym == FcitxKey_BackSpace) {
             if (!buf_.empty()) {
                 if (cursor_ > 0) {
@@ -2271,6 +2361,7 @@ void WeTypeEngine::processKey(KeyEvent &event) {
                         cursor_ = 0;
                         cands_.clear();
                         covers_.clear();
+                        engineIndices_.clear();
                         candidatesCurrent_ = false;
                         windowStart_ = 0;
                         selected_ = 0;
@@ -2282,6 +2373,62 @@ void WeTypeEngine::processKey(KeyEvent &event) {
                     }
                 } else {
                     handled = true;
+                }
+            } else if (*config_.undoCommitOnBackspace && restorableCommit_) {
+                const auto nowTime = std::chrono::steady_clock::now();
+                const auto elapsedSec = std::chrono::duration_cast<std::chrono::seconds>(nowTime - restorableCommit_->time).count();
+                if (elapsedSec < 10) {
+                    const auto wordLength = fcitx::utf8::lengthValidated(restorableCommit_->text);
+                    bool undone = false;
+                    // 1. 若客户端支持周围文本协议，通过周围文本进行精确比对与安全删除
+                    if (wordLength != fcitx::utf8::INVALID_LENGTH &&
+                        ic->capabilityFlags().test(CapabilityFlag::SurroundingText)) {
+                        const auto &surrounding = ic->surroundingText();
+                        const auto &text = surrounding.text();
+                        const auto textLength = fcitx::utf8::lengthValidated(text);
+                        if (surrounding.isValid() &&
+                            textLength != fcitx::utf8::INVALID_LENGTH &&
+                            surrounding.cursor() == surrounding.anchor() &&
+                            surrounding.cursor() <= textLength &&
+                            surrounding.cursor() >= wordLength &&
+                            wordLength <= static_cast<unsigned int>(INT_MAX)) {
+                            const auto prefixEnd = fcitx::utf8::nextNChar(text.begin(), surrounding.cursor());
+                            const auto prefixBegin = fcitx::utf8::nextNChar(text.begin(), surrounding.cursor() - wordLength);
+                            const std::string preceding(prefixBegin, prefixEnd);
+                            if (preceding == restorableCommit_->text) {
+                                ic->deleteSurroundingText(-static_cast<int>(wordLength), static_cast<unsigned int>(wordLength));
+                                undone = true;
+                            }
+                        }
+                    }
+                    // 2. 降级支持：对于无周围文本支持的客户端（如终端、Chromium/Edge、Electron/VS Code等），
+                    // 若紧接在上屏后的短时间窗口（4秒）内按退格，模拟发送对应字符数的退格键擦除刚上屏内容
+                    if (!undone && elapsedSec < 4 && wordLength != fcitx::utf8::INVALID_LENGTH && wordLength > 0 && wordLength <= 32) {
+                        for (size_t i = 0; i < wordLength; ++i) {
+                            ic->forwardKey(Key(FcitxKey_BackSpace), false);
+                            ic->forwardKey(Key(FcitxKey_BackSpace), true);
+                        }
+                        undone = true;
+                    }
+
+                    if (undone) {
+                        buf_ = std::move(restorableCommit_->pinyin);
+                        cursor_ = restorableCommit_->cursor;
+                        cursorEditing_ = true;
+                        restorableCommit_.reset();
+                        pendingLearn_.reset();
+                        ensureEngine();
+                        ++revision_;
+                        candidatesCurrent_ = false;
+                        eng_.send("C", nullptr);
+                        requestCandidates(buf_);
+                        updateUI(*ic);
+                        handled = true;
+                    }
+                }
+                if (!handled) {
+                    restorableCommit_.reset();
+                    flushPendingLearn();
                 }
             }
         }

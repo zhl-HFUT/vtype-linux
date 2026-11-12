@@ -63,6 +63,12 @@ FCITX_CONFIGURATION(WeTypeConfig,
         {Key(FcitxKey_Down), Key(FcitxKey_n, KeyState::Ctrl), Key(FcitxKey_Down, KeyState::Ctrl)},
         KeyListConstrain(KeyConstrainFlag::AllowModifierLess)};
 
+    // 候选优化与选词增强设置
+    Option<bool> undoCommitOnBackspace{
+        this, "UndoCommitOnBackspace", "退格键撤销刚上屏的词并恢复候选 (误按退格恢复)", true};
+    Option<bool> promoteUserSelection{
+        this, "PromoteUserSelection", "优先置顶用户所选候选词 (减少重复选词)", true};
+
     // 模糊音设置 (19 组，与微信输入法官方一致)
     Option<bool> fuzzyZ_ZH{this, "Fuzzy_Z_ZH", "模糊音：z = zh", false};
     Option<bool> fuzzyC_CH{this, "Fuzzy_C_CH", "模糊音：c = ch", false};
