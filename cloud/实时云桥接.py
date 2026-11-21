@@ -238,10 +238,19 @@ def main():
         allowed=config.get('test_queries')
         if allowed is not None:assert query in allowed
         return safe
+    probe_cache={}
     def query_cloud(task,raw):
         with (p.STATE/'identity.lock').open('a+') as lock:
             fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
-            client=p.Probe(json.loads((p.STATE/'identity.json').read_text()));client.timeout=1.2
+            # 复用 Probe（含其持久 HTTPS 连接）：省去每次的 openssl ECDH 派生与
+            # TCP/TLS 握手；身份文件变化（重新配对）时按 mtime 重建。
+            identity_path=p.STATE/'identity.json'
+            stamp=identity_path.stat().st_mtime_ns
+            if probe_cache.get('stamp')!=stamp:
+                probe_cache['client']=p.Probe(json.loads(identity_path.read_text()))
+                probe_cache['client'].timeout=1.2
+                probe_cache['stamp']=stamp
+            client=probe_cache['client']
             response=client.request('/api_v2',raw,2,service_command=4329)
         rows=candidates(response)
         assert len(response)<=65536
