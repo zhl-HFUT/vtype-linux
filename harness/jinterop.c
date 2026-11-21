@@ -1310,10 +1310,15 @@ static void run_daemon(void *h, long sid) {
     /* 会话 TTL 管理不是 iterator 析构；iterator 必须单独归还引擎。 */
     void *(*sym_gc)(void *, void *) = (void *(*)(void *, void *))dlsym(h, "_Z11gc_sessionsP7_JNIEnvP8_jobject");
     if (!sym_gc) sym_gc = (void *(*)(void *, void *))dlsym(h, "gc_sessions");
-    static int gc_every = -1;   /* 每 N 次请求调一次 gc_sessions，0=每次，-1 默认 1 */
+    /* 每批输入后调 gc_sessions 会在空闲超过引擎会话 TTL 后误删仍在用的会话：
+     * 恢复输入的首键正常，其后的按键全部吃满 2500ms 等待超时，直到 C 重建会话
+     * （harness.log 实录：首键 70 候选 → 两批 candidates=-1 → reset）。
+     * 会话回收由 C 清空重建、退出时 destroy_session 与 iterator 归还负责，
+     * 默认关闭；WETYPE_GC_SESSIONS_EVERY=N 供实验重新打开。 */
+    static int gc_every = -1;
     if (gc_every < 0) {
         const char *e = getenv("WETYPE_GC_SESSIONS_EVERY");
-        gc_every = e ? atoi(e) : 1;
+        gc_every = e ? atoi(e) : 0;
     }
     long since_gc = 0;
     g_native_dci=sym_dci;g_active_sid=sid;
