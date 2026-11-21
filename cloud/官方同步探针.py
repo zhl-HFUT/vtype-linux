@@ -7,6 +7,7 @@ import fcntl
 import ctypes
 import ctypes.util
 import hashlib
+import http.client
 import json
 import os
 from pathlib import Path
@@ -127,6 +128,9 @@ def snappy_decompress(data):
     return output.raw[:size.value]
 
 class Probe:
+    HOST = "wetype.weixin.qq.com"
+    conn = None   # 持久 HTTPS 连接；复用可省去每次请求的 TCP/TLS 握手（类级默认，兼容 __new__ 构造）
+
     def __init__(self, identity):
         self.identity = identity
         self.key = shared_key(identity)
@@ -140,10 +144,26 @@ class Probe:
     def request(self, path, plain, command=None, service_command=4814):
         encrypted = path != "/timestamp"
         body, headers = self.prepare(path, plain, command, service_command)
-        with self.http.open(urllib.request.Request("https://wetype.weixin.qq.com"+path, data=body, headers=headers), timeout=getattr(self,"timeout",20)) as response:
-            data = response.read(2*1024*1024+1)
-            compression = response.headers.get("Kb-CompressionType", "1")
+        data, compression = self.send(path, body, headers)
         return self.finish(data, compression, encrypted)
+
+    def send(self, path, body, headers):
+        """在持久连接上发送请求。复用的连接可能已被服务端静默关闭：仅当
+        失败发生在复用连接上时重建并重发一次（服务端关闭闲置连接时几乎必然
+        尚未处理请求）；新连接上的失败直接抛出，与原有行为一致。"""
+        for attempt in (0, 1):
+            reused = self.conn is not None
+            try:
+                if self.conn is None:
+                    self.conn = http.client.HTTPSConnection(self.HOST, timeout=getattr(self,"timeout",20))
+                self.conn.request("POST", path, body, headers)
+                response = self.conn.getresponse()
+                data = response.read(2*1024*1024+1)
+                return data, response.headers.get("Kb-CompressionType", "1")
+            except (OSError, http.client.HTTPException):
+                self.conn = None
+                if not reused or attempt:
+                    raise
 
     def prepare(self, path, plain, command=None, service_command=4814):
         """加密请求体并生成签名请求头；返回 (body, headers)。"""

@@ -14,21 +14,19 @@ class Response:
         self.data = data
         self.headers = {'Kb-CompressionType': compression}
 
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *_):
-        pass
-
     def read(self, limit):
         return self.data[:limit]
 
 
-class Transport:
+class Connection:
+    """注入 Probe 的持久连接接口（request/getresponse/read）。"""
     def __init__(self, response):
         self.response = response
 
-    def open(self, *_args, **_kwargs):
+    def request(self, *_args, **_kwargs):
+        pass
+
+    def getresponse(self):
         return self.response
 
 
@@ -40,7 +38,7 @@ class SnappyTransportTest(unittest.TestCase):
         probe.offset = 0
         probe.task = 1
         payload = p.aes(data, probe.key, True) if encrypted else data
-        probe.http = Transport(Response(payload, compression))
+        probe.conn = Connection(Response(payload, compression))
         return probe.request('/api_v2' if encrypted else '/timestamp', b'')
 
     def test_literal_compressed_response(self):
